@@ -22,6 +22,25 @@ const MAX_RETRIES_NUM = parseInt(MAX_RETRIES, 10);
 const RETRY_DELAY = parseInt(RETRY_DELAY_MS, 10);
 const DISCOVERY_INTERVAL = parseInt(DISCOVERY_INTERVAL_MS, 10);
 
+const HOP_BY_HOP = new Set([
+  "transfer-encoding", "connection", "keep-alive",
+  "proxy-authenticate", "proxy-authorization",
+  "te", "trailer", "upgrade",
+]);
+
+const SSE_EOM = "event: message_stop";
+
+const AGENT = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 60000,
+  maxSockets: 64,
+  maxFreeSockets: 16,
+  timeout: 120000,
+  scheduling: "lifo",
+});
+
+let activeStreams = 0;
+
 const SPOOF_HEADERS = {
   "User-Agent": "claude-cli/2.1.92 (external, sdk-cli)",
   "Anthropic-Version": "2023-06-01",
@@ -118,17 +137,6 @@ async function fetchModels() {
     modelsList = [...STATIC_MODELS];
   }
 }
-
-// ── Connection pooling ──
-
-const AGENT = new https.Agent({
-  keepAlive: true,
-  keepAliveMsecs: 60000,
-  maxSockets: 64,
-  maxFreeSockets: 16,
-  timeout: 120000,
-  scheduling: "lifo",
-});
 
 // ── DNS cache ──
 
@@ -237,10 +245,17 @@ function recordFailure() {
   }
 }
 
-// ── Helpers ──
-
 function log(ts, msg) {
   console.log(`[${ts}] ${msg}`);
+}
+
+function filterHeaders(headers) {
+  if (!headers) return {};
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (!HOP_BY_HOP.has(k.toLowerCase())) out[k] = v;
+  }
+  return out;
 }
 
 function rewritePath(path) {
@@ -287,6 +302,7 @@ const server = http.createServer((req, res) => {
       modelSource,
       staticModels: STATIC_MODELS.length,
       availableModels: modelsList.length,
+      activeStreams,
       wafCookie: !!wafCookieStr,
       circuitOpen: isCircuitOpen(),
       consecutiveFails,
@@ -303,6 +319,15 @@ const server = http.createServer((req, res) => {
 
   // ── Proxy ──
   const body = [];
+  let upstreamReq = null;
+  let proxyDone = false;
+
+  function finishProxy() {
+    if (proxyDone) return;
+    proxyDone = true;
+    activeStreams--;
+  }
+
   req.on("data", (c) => body.push(c));
   req.on("end", () => {
     const path = rewritePath(rawPath);
@@ -336,8 +361,9 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    activeStreams++;
+
     async function doRequest(attempt) {
-      // Refresh DNS if needed
       const ip = getTargetIp();
       if (!ip && cachedIps.length) {
         resolveDns().catch(() => {});
@@ -357,7 +383,7 @@ const server = http.createServer((req, res) => {
           timeout: TIMEOUT,
         };
 
-        const upstreamReq = https.request(opts, (upstreamRes) => {
+        upstreamReq = https.request(opts, (upstreamRes) => {
           const statusCode = upstreamRes.statusCode;
 
           // Handle WAF block: re-warmup and retry once
@@ -374,12 +400,12 @@ const server = http.createServer((req, res) => {
                 resolveProxy(result);
                 return;
               }
-              // Not a WAF block, pass through
               log(ts, `${method} ${rawPath} <- ${statusCode} (${raw.length}b)`);
               log(ts, `RESPONSE BODY: ${raw.toString("utf8").slice(0, 2000)}`);
               recordFailure();
-              res.writeHead(statusCode, upstreamRes.headers);
+              res.writeHead(statusCode, filterHeaders(upstreamRes.headers));
               res.end(raw);
+              finishProxy();
               resolveProxy();
             });
             return;
@@ -398,9 +424,12 @@ const server = http.createServer((req, res) => {
           }
 
           recordSuccess();
-          res.writeHead(statusCode, upstreamRes.headers);
-          const isError = statusCode !== 200;
-          if (isError) {
+
+          const filteredHeaders = filterHeaders(upstreamRes.headers);
+          const isSse = (upstreamRes.headers["content-type"] || "").includes("text/event-stream");
+          res.writeHead(statusCode, filteredHeaders);
+
+          if (statusCode !== 200) {
             const errChunks = [];
             upstreamRes.on("data", (c) => errChunks.push(c));
             upstreamRes.on("end", () => {
@@ -408,39 +437,57 @@ const server = http.createServer((req, res) => {
               log(ts, `${method} ${rawPath} <- ${statusCode} (${raw.length}b)`);
               log(ts, `RESPONSE BODY: ${raw.toString("utf8").slice(0, 2000)}`);
               try { res.end(raw); } catch {}
+              finishProxy();
               resolveProxy();
             });
             upstreamRes.on("error", () => {
               try { res.end(); } catch {}
+              finishProxy();
               resolveProxy();
             });
-          } else {
-            upstreamRes.on("data", (chunk) => {
-              try { res.write(chunk); } catch {}
-            });
-            upstreamRes.on("end", () => {
-              try { res.end(); } catch {}
-              log(ts, `${method} ${rawPath} <- ${statusCode} (stream complete)`);
-              resolveProxy();
-            });
-            upstreamRes.on("error", (e) => {
-              log(ts, `${method} ${rawPath} <- UPSTREAM STREAM ERROR: ${e.message}`);
-              try { res.end(); } catch {}
-              resolveProxy();
-            });
-            upstreamRes.on("close", () => {
-              if (!res.writableEnded) {
-                log(ts, `${method} ${rawPath} <- UPSTREAM CLOSED (connection terminated prematurely)`);
-                try { res.end(); } catch {}
-                resolveProxy();
-              }
-            });
-            res.on("error", (e) => {
-              log(ts, `${method} ${rawPath} <- DOWNSTREAM ERROR (client disconnected): ${e.message}`);
-              upstreamReq.destroy();
-              resolveProxy();
-            });
+            return;
           }
+
+          // Streaming (200 + SSE)
+          let sawMessageStop = false;
+
+          upstreamRes.on("data", (chunk) => {
+            if (isSse && chunk.includes(SSE_EOM)) sawMessageStop = true;
+            const canContinue = res.write(chunk);
+            if (!canContinue) {
+              upstreamRes.pause();
+              res.once("drain", () => upstreamRes.resume());
+            }
+          });
+
+          upstreamRes.on("end", () => {
+            try { res.end(); } catch {}
+            log(ts, `${method} ${rawPath} <- ${statusCode} (stream complete)`);
+            finishProxy();
+            resolveProxy();
+          });
+
+          upstreamRes.on("error", (e) => {
+            log(ts, `${method} ${rawPath} <- UPSTREAM STREAM ERROR: ${e.message}`);
+            if (isSse && !sawMessageStop) {
+              try { res.write(`\n${SSE_EOM}\ndata: {}\n\n`); } catch {}
+            }
+            try { res.end(); } catch {}
+            finishProxy();
+            resolveProxy();
+          });
+
+          upstreamRes.on("close", () => {
+            if (!res.writableEnded) {
+              log(ts, `${method} ${rawPath} <- UPSTREAM CLOSED (connection terminated prematurely)`);
+              if (isSse && !sawMessageStop) {
+                try { res.write(`\n${SSE_EOM}\ndata: {}\n\n`); } catch {}
+              }
+              try { res.end(); } catch {}
+              finishProxy();
+              resolveProxy();
+            }
+          });
         });
 
         upstreamReq.on("timeout", () => {
@@ -473,8 +520,12 @@ const server = http.createServer((req, res) => {
               });
             }
           } else {
-            res.destroy(e);
+            if (upstreamRes?.headers?.["content-type"]?.includes("text/event-stream") && attempt >= MAX_RETRIES_NUM) {
+              try { res.write(`\nevent: message_stop\ndata: {}\n\n`); } catch {}
+            }
+            try { res.end(); } catch {}
           }
+          finishProxy();
           resolveProxy();
         }
 
@@ -485,9 +536,23 @@ const server = http.createServer((req, res) => {
 
     doRequest(0).catch(() => {});
   });
+
+  // Client disconnect — stop upstream request
+  req.on("close", () => {
+    if (!proxyDone && upstreamReq && !upstreamReq.destroyed) {
+      upstreamReq.destroy();
+      finishProxy();
+    }
+  });
+  req.on("error", () => {
+    if (!proxyDone && upstreamReq && !upstreamReq.destroyed) {
+      upstreamReq.destroy();
+      finishProxy();
+    }
+  });
 });
 
-// ── Start ──
+// ── Start & Graceful Shutdown ──
 
 function scheduleDiscovery() {
   if (!AR_API_KEY) {
@@ -504,3 +569,18 @@ server.listen(PORT, "0.0.0.0", async () => {
   scheduleWarmup();
   scheduleDiscovery();
 });
+
+function shutdown(signal) {
+  console.log(`\n[${new Date().toISOString()}] ${signal} received — draining ${activeStreams} active streams...`);
+  server.close(() => {
+    console.log(`[${new Date().toISOString()}] Server closed, exiting.`);
+    process.exit(0);
+  });
+  setTimeout(() => {
+    console.error(`[${new Date().toISOString()}] Forced exit after timeout`);
+    process.exit(1);
+  }, 15000).unref();
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
