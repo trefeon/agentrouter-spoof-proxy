@@ -407,14 +407,37 @@ const server = http.createServer((req, res) => {
               const raw = Buffer.concat(errChunks);
               log(ts, `${method} ${rawPath} <- ${statusCode} (${raw.length}b)`);
               log(ts, `RESPONSE BODY: ${raw.toString("utf8").slice(0, 2000)}`);
-              res.end(raw);
+              try { res.end(raw); } catch {}
+              resolveProxy();
+            });
+            upstreamRes.on("error", () => {
+              try { res.end(); } catch {}
               resolveProxy();
             });
           } else {
-            upstreamRes.on("data", (chunk) => res.write(chunk));
+            upstreamRes.on("data", (chunk) => {
+              try { res.write(chunk); } catch {}
+            });
             upstreamRes.on("end", () => {
-              res.end();
+              try { res.end(); } catch {}
               log(ts, `${method} ${rawPath} <- ${statusCode} (stream complete)`);
+              resolveProxy();
+            });
+            upstreamRes.on("error", (e) => {
+              log(ts, `${method} ${rawPath} <- UPSTREAM STREAM ERROR: ${e.message}`);
+              try { res.end(); } catch {}
+              resolveProxy();
+            });
+            upstreamRes.on("close", () => {
+              if (!res.writableEnded) {
+                log(ts, `${method} ${rawPath} <- UPSTREAM CLOSED (connection terminated prematurely)`);
+                try { res.end(); } catch {}
+                resolveProxy();
+              }
+            });
+            res.on("error", (e) => {
+              log(ts, `${method} ${rawPath} <- DOWNSTREAM ERROR (client disconnected): ${e.message}`);
+              upstreamReq.destroy();
               resolveProxy();
             });
           }
