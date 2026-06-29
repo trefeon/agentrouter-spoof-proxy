@@ -5,6 +5,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 const {
   LISTEN_PORT = "8318",
+  TARGET_PROTOCOL = "https",
   TARGET_HOST = "agentrouter.org",
   TARGET_PORT = "443",
   REQUEST_TIMEOUT_MS = "120000",
@@ -32,7 +33,9 @@ const HOP_BY_HOP = new Set([
 
 const SSE_EOM = "event: message_stop";
 
-const AGENT = new https.Agent({
+const UPSTREAM_MODULE = TARGET_PROTOCOL === "http" ? http : https;
+
+const AGENT = new UPSTREAM_MODULE.Agent({
   keepAlive: true,
   keepAliveMsecs: 1000,
   maxSockets: 64,
@@ -88,7 +91,7 @@ async function fetchModels() {
   const ts = new Date().toISOString();
   try {
     const data = await new Promise((resolve, reject) => {
-      const req = https.request(
+      const req = UPSTREAM_MODULE.request(
         {
           hostname: TARGET_HOST,
           port: TARGET_PORT_INT,
@@ -179,7 +182,7 @@ async function warmup() {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const cookie = await new Promise((resolve, reject) => {
-        const req = https.request(
+        const req = UPSTREAM_MODULE.request(
           {
             hostname: TARGET_HOST,
             port: TARGET_PORT_INT,
@@ -281,6 +284,9 @@ function isRetryable(statusCode, errorMessage) {
   return false;
 }
 
+// ── SSE idle timeout (5 min no data = hung stream) ──
+const SSE_IDLE_TIMEOUT_MS = 300000;
+
 // ── Server ──
 
 const server = http.createServer((req, res) => {
@@ -313,7 +319,7 @@ const server = http.createServer((req, res) => {
 
   // ── Proxy ──
   const body = [];
-  let upstreamReq = null;
+  let currentUpstreamReq = null;   // tracks the CURRENT attempt's request (scoped per-attempt via closure)
   let proxyDone = false;
   let hasEnded = false;
 
@@ -321,6 +327,28 @@ const server = http.createServer((req, res) => {
     if (proxyDone) return;
     proxyDone = true;
     activeStreams--;
+  }
+
+  // Safe response helpers — guard against ERR_HTTP_HEADERS_SENT
+  function safeWriteHead(statusCode, headers) {
+    if (res.headersSent) return false;
+    try { res.writeHead(statusCode, headers); return true; }
+    catch (e) { log(ts, `safeWriteHead error: ${e.message}`); return false; }
+  }
+
+  function safeEnd(data) {
+    if (res.writableEnded) return;
+    try { res.end(data); } catch {}
+  }
+
+  function safeWrite(data) {
+    if (res.writableEnded) return false;
+    try { return res.write(data); } catch { return false; }
+  }
+
+  function safeRespondJson(status, data) {
+    if (res.headersSent || res.writableEnded) return;
+    try { respondJson(res, status, data); } catch (e) { log(ts, `safeRespondJson error: ${e.message}`); }
   }
 
   req.on("data", (c) => body.push(c));
@@ -340,7 +368,7 @@ const server = http.createServer((req, res) => {
 
     if (isCircuitOpen()) {
       log(ts, `${method} ${rawPath} -> REJECTED (circuit open)`);
-      respondJson(res, 503, {
+      safeRespondJson(503, {
         error: { code: "circuit_open", message: "Upstream circuit breaker open, retry later", type: "proxy_error" },
       });
       return;
@@ -352,6 +380,9 @@ const server = http.createServer((req, res) => {
       log(ts, `${method} ${rawPath} -> ${path} (attempt ${attempt + 1})`);
 
       return new Promise((resolveProxy) => {
+        // Guard: if proxy already finished (client disconnected, previous attempt resolved), skip
+        if (proxyDone) { resolveProxy(); return; }
+
         const opts = {
           hostname: TARGET_HOST,
           port: TARGET_PORT_INT,
@@ -363,7 +394,14 @@ const server = http.createServer((req, res) => {
           timeout: TIMEOUT,
         };
 
-        upstreamReq = https.request(opts, (upstreamRes) => {
+        let errorHandled = false;  // prevent double-invocation of handleError (timeout fires error)
+        let idleTimer = null;      // SSE idle timeout
+
+        function clearIdleTimer() {
+          if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+        }
+
+        const upstreamReq = UPSTREAM_MODULE.request(opts, (upstreamRes) => {
           const statusCode = upstreamRes.statusCode;
 
           // Handle WAF block: re-warmup and retry once
@@ -383,8 +421,8 @@ const server = http.createServer((req, res) => {
               log(ts, `${method} ${rawPath} <- ${statusCode} (${raw.length}b)`);
               log(ts, `RESPONSE BODY: ${raw.toString("utf8").slice(0, 2000)}`);
               recordFailure();
-              res.writeHead(statusCode, filterHeaders(upstreamRes.headers));
-              res.end(raw);
+              safeWriteHead(statusCode, filterHeaders(upstreamRes.headers));
+              safeEnd(raw);
               finishProxy();
               resolveProxy();
             });
@@ -407,7 +445,14 @@ const server = http.createServer((req, res) => {
 
           const filteredHeaders = filterHeaders(upstreamRes.headers);
           const isSse = (upstreamRes.headers["content-type"] || "").includes("text/event-stream");
-          res.writeHead(statusCode, filteredHeaders);
+
+          if (!safeWriteHead(statusCode, filteredHeaders)) {
+            // Headers already sent (race condition) — drain upstream, don't double-send
+            upstreamRes.resume();
+            finishProxy();
+            resolveProxy();
+            return;
+          }
 
           if (statusCode !== 200) {
             const errChunks = [];
@@ -416,12 +461,12 @@ const server = http.createServer((req, res) => {
               const raw = Buffer.concat(errChunks);
               log(ts, `${method} ${rawPath} <- ${statusCode} (${raw.length}b)`);
               log(ts, `RESPONSE BODY: ${raw.toString("utf8").slice(0, 2000)}`);
-              try { res.end(raw); } catch {}
+              safeEnd(raw);
               finishProxy();
               resolveProxy();
             });
             upstreamRes.on("error", () => {
-              try { res.end(); } catch {}
+              safeEnd();
               finishProxy();
               resolveProxy();
             });
@@ -430,58 +475,115 @@ const server = http.createServer((req, res) => {
 
           // Streaming (200 + SSE)
           let sawMessageStop = false;
+          let streamFinished = false;  // prevent double finish from end+close
+
+          function finishStream() {
+            if (streamFinished) return;
+            streamFinished = true;
+            clearIdleTimer();
+            finishProxy();
+            resolveProxy();
+          }
+
+          // Set up SSE idle timeout — if no data for 5 min, abort
+          function resetIdleTimer() {
+            clearIdleTimer();
+            if (isSse && !streamFinished) {
+              idleTimer = setTimeout(() => {
+                if (streamFinished) return;
+                log(ts, `${method} ${rawPath} <- SSE IDLE TIMEOUT (${SSE_IDLE_TIMEOUT_MS / 1000}s no data)`);
+                if (!sawMessageStop) {
+                  safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`);
+                }
+                safeEnd();
+                if (!upstreamReq.destroyed) upstreamReq.destroy();
+                finishStream();
+              }, SSE_IDLE_TIMEOUT_MS);
+              idleTimer.unref();
+            }
+          }
+
+          resetIdleTimer();
 
           upstreamRes.on("data", (chunk) => {
+            if (streamFinished) return;
+            resetIdleTimer();
             if (isSse && chunk.includes(SSE_EOM)) sawMessageStop = true;
-            const canContinue = res.write(chunk);
-            if (!canContinue) {
+            const canContinue = safeWrite(chunk);
+            if (canContinue === false && !res.writableEnded) {
               upstreamRes.pause();
-              res.once("drain", () => upstreamRes.resume());
+              res.once("drain", () => { if (!streamFinished) upstreamRes.resume(); });
             }
           });
 
           upstreamRes.on("end", () => {
-            try { res.end(); } catch {}
+            if (streamFinished) return;
+            safeEnd();
             log(ts, `${method} ${rawPath} <- ${statusCode} (stream complete)`);
-            finishProxy();
-            resolveProxy();
+            finishStream();
           });
 
           upstreamRes.on("error", (e) => {
+            if (streamFinished) return;
             log(ts, `${method} ${rawPath} <- UPSTREAM STREAM ERROR: ${e.message}`);
+            if (isSse && !sawMessageStop) {
+              safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`);
+            }
+            safeEnd();
+            finishStream();
+          });
+
+          upstreamRes.on("close", () => {
+            if (streamFinished) return;
+            if (!res.writableEnded) {
+              log(ts, `${method} ${rawPath} <- UPSTREAM CLOSED (connection terminated prematurely)`);
+              if (isSse && !sawMessageStop) {
+                safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`);
+              }
+              safeEnd();
+            }
+            finishStream();
+          });
+        });
+
+        // Track current upstream request for client-disconnect handler
+        currentUpstreamReq = upstreamReq;
+
+        upstreamReq.on("timeout", () => {
+          if (errorHandled) return;
+          errorHandled = true;
+          clearIdleTimer();
+          upstreamReq.destroy();
+          handleError(new Error("timeout"));
+        });
+
+        upstreamReq.on("error", (e) => {
+          if (errorHandled) return;
+          errorHandled = true;
+          clearIdleTimer();
+          handleError(e);
+        });
+
+        async function handleError(e) {
+          if (proxyDone) { resolveProxy(); return; }
+
+          if (res.headersSent) {
+            recordFailure();
+            log(ts, `${method} ${rawPath} -> STREAM ERROR after partial response: ${e.message}`);
             if (isSse && !sawMessageStop) {
               try { res.write(`\n${SSE_EOM}\ndata: {}\n\n`); } catch {}
             }
             try { res.end(); } catch {}
             finishProxy();
             resolveProxy();
-          });
+            return;
+          }
 
-          upstreamRes.on("close", () => {
-            if (!res.writableEnded) {
-              log(ts, `${method} ${rawPath} <- UPSTREAM CLOSED (connection terminated prematurely)`);
-              if (isSse && !sawMessageStop) {
-                try { res.write(`\n${SSE_EOM}\ndata: {}\n\n`); } catch {}
-              }
-              try { res.end(); } catch {}
-              finishProxy();
-              resolveProxy();
-            }
-          });
-        });
-
-        upstreamReq.on("timeout", () => {
-          upstreamReq.destroy();
-          handleError(new Error("timeout"));
-        });
-
-        upstreamReq.on("error", (e) => handleError(e));
-
-        async function handleError(e) {
           if (attempt < MAX_RETRIES_NUM && isRetryable(null, e.message)) {
             log(ts, `${method} ${rawPath} -> ERROR: ${e.message}, retrying (${attempt + 1}/${MAX_RETRIES_NUM})...`);
             const delay = RETRY_DELAY * Math.pow(2, attempt);
             await sleep(delay);
+            if (proxyDone) { resolveProxy(); return; }
             const result = await doRequest(attempt + 1);
             resolveProxy(result);
             return;
@@ -489,21 +591,14 @@ const server = http.createServer((req, res) => {
 
           recordFailure();
           log(ts, `${method} ${rawPath} -> ERROR: ${e.message} (final)`);
-          if (!res.headersSent) {
-            if (e.message === "timeout") {
-              respondJson(res, 504, {
-                error: { code: "timeout", message: "Upstream request timed out", type: "proxy_error" },
-              });
-            } else {
-              respondJson(res, 502, {
-                error: { code: "proxy_error", message: e.message, type: "proxy_error" },
-              });
-            }
+          if (e.message === "timeout") {
+            safeRespondJson(504, {
+              error: { code: "timeout", message: "Upstream request timed out", type: "proxy_error" },
+            });
           } else {
-            if (upstreamRes?.headers?.["content-type"]?.includes("text/event-stream") && attempt >= MAX_RETRIES_NUM) {
-              try { res.write(`\nevent: message_stop\ndata: {}\n\n`); } catch {}
-            }
-            try { res.end(); } catch {}
+            safeRespondJson(502, {
+              error: { code: "proxy_error", message: e.message, type: "proxy_error" },
+            });
           }
           finishProxy();
           resolveProxy();
@@ -515,20 +610,31 @@ const server = http.createServer((req, res) => {
       });
     }
 
-    doRequest(0).catch(() => {});
+    doRequest(0).catch((e) => {
+      log(ts, `${method} ${rawPath} -> UNHANDLED PROXY ERROR: ${e.message}`);
+      safeRespondJson(500, {
+        error: { code: "internal_error", message: "Proxy internal error", type: "proxy_error" },
+      });
+      finishProxy();
+    });
   });
 
   // Client disconnect — stop upstream request
+  // IMPORTANT: req.on("close") fires on HTTP/1.1 keepalive when connection is reused
+  // for the next request. We must NOT destroy upstream or decrement activeStreams in that case.
+  // The streaming handlers manage cleanup. Only destroy upstream if client truly disconnected
+  // (body not received yet or socket destroyed).
   req.on("close", () => {
-    if (!proxyDone && upstreamReq && !upstreamReq.destroyed && !hasEnded) {
-      upstreamReq.destroy();
-      finishProxy();
+    if (proxyDone) return;
+    const trulyDisconnected = !hasEnded || req.socket?.destroyed;
+    if (trulyDisconnected && currentUpstreamReq && !currentUpstreamReq.destroyed) {
+      currentUpstreamReq.destroy();
     }
   });
   req.on("error", () => {
-    if (!proxyDone && upstreamReq && !upstreamReq.destroyed) {
-      upstreamReq.destroy();
-      finishProxy();
+    if (proxyDone) return;
+    if (currentUpstreamReq && !currentUpstreamReq.destroyed) {
+      currentUpstreamReq.destroy();
     }
   });
 });
@@ -565,3 +671,10 @@ function shutdown(signal) {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
+
+// Prevent uncaught exceptions (e.g. ERR_HTTP_HEADERS_SENT race) from crashing
+process.on("uncaughtException", (err) => {
+  console.error(`[${new Date().toISOString()}] UNCAUGHT EXCEPTION: ${err.message}`);
+  console.error(err.stack);
+  // Don't exit — let Docker health check restart if truly broken
+});
