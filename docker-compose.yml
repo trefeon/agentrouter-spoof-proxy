@@ -5,7 +5,8 @@ services:
     ports:
       - "8318:8318"
     networks:
-      - 9router-net
+      9router-net:
+        ipv4_address: 172.18.0.3
     environment:
       - LISTEN_PORT=8318
       - TARGET_HOST=agentrouter.org
@@ -22,3 +23,4 @@ services:
 networks:
   9router-net:
     external: true
+    name: 9router-net
