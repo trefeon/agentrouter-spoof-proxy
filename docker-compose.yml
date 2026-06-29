@@ -3,24 +3,19 @@ services:
     build: .
     container_name: agentrouter-proxy
     ports:
-      - "8318:8318"
-    networks:
-      9router-net:
-        ipv4_address: 172.18.0.3
+      - "${LISTEN_PORT:-8318}:${LISTEN_PORT:-8318}"
+    env_file:
+      - path: .env
+        required: false
     environment:
-      - LISTEN_PORT=8318
-      - TARGET_HOST=agentrouter.org
-      - TARGET_PORT=443
-      - REQUEST_TIMEOUT_MS=120000
-      - MODELS_CSV=claude-opus-4-6,claude-opus-4-7,claude-opus-4-8,glm-5.2,gpt-5.5
-      - WARMUP_INTERVAL_MS=180000
-      - MAX_RETRIES=2
-      - RETRY_DELAY_MS=1000
-      - AR_API_KEY=
-      - DISCOVERY_INTERVAL_MS=600000
+      - LISTEN_PORT=${LISTEN_PORT:-8318}
+      - TARGET_HOST=${TARGET_HOST:-agentrouter.org}
+      - TARGET_PORT=${TARGET_PORT:-443}
+      - REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS:-120000}
+      - MODELS_CSV=${MODELS_CSV:-claude-opus-4-6,claude-opus-4-7,claude-opus-4-8,glm-5.2,gpt-5.5}
+      - WARMUP_INTERVAL_MS=${WARMUP_INTERVAL_MS:-180000}
+      - MAX_RETRIES=${MAX_RETRIES:-2}
+      - RETRY_DELAY_MS=${RETRY_DELAY_MS:-1000}
+      - AR_API_KEY=${AR_API_KEY:-}
+      - DISCOVERY_INTERVAL_MS=${DISCOVERY_INTERVAL_MS:-600000}
     restart: unless-stopped
-
-networks:
-  9router-net:
-    external: true
-    name: 9router-net

@@ -1,245 +1,181 @@
 # AgentRouter Spoof Proxy
 
-A lightweight Node.js reverse proxy that injects Claude Code spoof headers and maintains WAF cookies to bypass AgentRouter restrictions. Designed to sit between 9Router and AgentRouter as an Anthropic-compatible provider.
+A lightweight Node.js reverse proxy that injects Claude Code spoof headers and maintains WAF cookies to bypass AgentRouter restrictions. Zero dependencies, single-file, ~680 lines, 120MB Docker image.
 
 ## Architecture
 
 ```
-opencode/LLM client → 9Router → agentrouter-proxy:8318 → agentrouter.org (upstream)
+Any OpenAI/Anthropic client → agentrouter-proxy:8318 → agentrouter.org (upstream)
 ```
 
 The proxy:
 - Rewrites `/messages` → `/v1/messages` (Anthropic API format)
 - Injects all spoof headers (`User-Agent`, `X-Stainless-*`, `Anthropic-Beta`, etc.)
 - Maintains `acw_tc` WAF cookies via periodic warmup
-- Pipes SSE streaming responses through without buffering
+- Pipes SSE streaming responses with backpressure handling
 - Retries on timeouts/5xx with exponential backoff
 - Circuit breaker on consecutive failures
+- Graceful shutdown with active stream draining
 
-## Prerequisites
-
-- Docker & Docker Compose
-- A running [9Router](https://github.com/your-org/9router) instance
-- An AgentRouter API key
-
-## Setup
-
-### 1. Deploy the proxy
+## Quick Start
 
 ```bash
+git clone https://github.com/trefeon/agentrouter-spoof-proxy.git
+cd agentrouter-spoof-proxy
 docker compose up -d --build
 ```
 
-This starts the proxy on port `8318` and attaches it to the `9router-net` Docker network so 9Router can reach it internally.
-
-### 2. Verify it's running
-
+Verify:
 ```bash
 curl http://localhost:8318/health
 ```
 
-Expected response:
 ```json
 {
   "ok": true,
   "upstream": "agentrouter.org:443",
-  "models": 5,
+  "modelSource": "static",
+  "availableModels": 5,
+  "activeStreams": 0,
   "wafCookie": true,
-  "circuitOpen": false,
-  "consecutiveFails": 0,
-  "cachedIps": 2
+  "circuitOpen": false
 }
 ```
 
-If `wafCookie` is `false`, the warmup hasn't completed yet — wait a few seconds and retry.
+If `wafCookie` is `false`, wait a few seconds and retry — the WAF warmup runs on startup.
 
----
+## Configuration
 
-## Connecting to 9Router
-
-9Router needs to know about this proxy as an upstream provider.
-
-### Add provider to 9Router config
-
-In your 9Router configuration, add an `anthropic-compatible` provider pointing to the proxy:
-
-```yaml
-providers:
-  - name: agentrouter
-    type: anthropic-compatible
-    base_url: http://agentrouter-proxy:8318
-    api_key: sk_9router_test
-    models:
-      - AG/claude-opus-4-6
-      - AG/claude-opus-4-7
-      - AG/claude-opus-4-8
-      - AG/glm-5.2
-```
-
-The proxy is reachable as `agentrouter-proxy` (Docker DNS on `9router-net`).
-
-### Send requests through 9Router
+Copy `.env.example` to `.env` and edit as needed:
 
 ```bash
-curl http://localhost:20128/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk_9router_test" \
-  -d '{
-    "model": "AG/claude-opus-4-8",
-    "messages": [{"role": "user", "content": "Hello"}],
-    "stream": true
-  }'
+cp .env.example .env
 ```
 
----
-
-## Connecting to opencode
-
-### 1. Add the provider to `opencode.jsonc`
-
-Edit `~/.config/opencode/opencode.jsonc`:
-
-```jsonc
-"9router": {
-  "npm": "@ai-sdk/openai-compatible",
-  "name": "9Router",
-  "options": {
-    "baseURL": "http://<SERVER_LAN_IP>:20128/v1"
-  },
-  "models": {
-    "claude-opus-4-6": {
-      "id": "AG/claude-opus-4-6",
-      "name": "Claude Opus 4.6",
-      "vision": true, "reasoning": true, "tool_call": true,
-      "cost": { "input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25 },
-      "limit": { "context": 1000000, "output": 128000 }
-    },
-    "claude-opus-4-7": {
-      "id": "AG/claude-opus-4-7",
-      "name": "Claude Opus 4.7",
-      "vision": true, "reasoning": true, "tool_call": true,
-      "cost": { "input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25 },
-      "limit": { "context": 1000000, "output": 128000 }
-    },
-    "claude-opus-4-8": {
-      "id": "AG/claude-opus-4-8",
-      "name": "Claude Opus 4.8",
-      "vision": true, "reasoning": true, "tool_call": true,
-      "cost": { "input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25 },
-      "limit": { "context": 1000000, "output": 128000 }
-    },
-    "glm-5.2": {
-      "id": "AG/glm-5.2",
-      "name": "GLM 5.2",
-      "reasoning": true, "tool_call": true,
-      "cost": { "input": 1.4, "output": 4.4, "cache_read": 0.26, "cache_write": 1.75 },
-      "limit": { "context": 1000000, "output": 131072 }
-    }
-  }
-}
-```
-
-Replace `<SERVER_LAN_IP>` with the IP of the machine running 9Router (e.g. `192.168.123.11`). Use `localhost` if opencode is on the same machine.
-
-### 2. Set the API key
-
-In opencode TUI, run:
-
-```
-/connect 9router
-```
-
-Enter: `sk_9router_test`
-
-### 3. Switch model
-
-Select `9router/claude-opus-4-8` as your active model and start chatting.
-
----
-
-## Model Modalities & opencode Config
-
-### Capabilities per model
-
-| Model | Input | Output | Vision | Reasoning | Tool Call |
-|-------|-------|--------|--------|-----------|-----------|
-| `claude-opus-4-6` | text, image (1568px cap) | text | ✅ | ✅ | ✅ |
-| `claude-opus-4-7` | text, image (2576px high-res) | text | ✅ | ✅ | ✅ |
-| `claude-opus-4-8` | text, image (2576px high-res) | text | ✅ | ✅ | ✅ |
-| `glm-5.2` | text | text | untested | ✅ | ✅ |
-
-All Claude Opus models accept `image` content blocks via Anthropic Messages API (base64 or URL). The proxy passes the request body through unchanged — image data reaches the upstream as-is.
-
-### opencode config reference
-
-Each model entry supports these fields:
-
-```jsonc
-"claude-opus-4-8": {
-  "id": "AG/claude-opus-4-8",       // model ID sent to 9Router
-  "name": "Claude Opus 4.8",         // display name in TUI
-  "reasoning": true,                 // enables extended/adaptive thinking
-  "tool_call": true,                 // enables tool/function calling
-  "vision": true,                    // enables image input support
-  "cost": {
-    "input": 5,                      // $/MTok input
-    "output": 25,                    // $/MTok output
-    "cache_read": 0.5,              // $/MTok cache read
-    "cache_write": 6.25             // $/MTok cache write
-  },
-  "limit": {
-    "context": 1000000,             // max context window (tokens)
-    "output": 128000                // max output tokens
-  }
-}
-```
-
-Set `"vision": false` on models that don't support images to prevent opencode from sending image content blocks.
-
----
-
-## Environment Variables
+All settings have sensible defaults. Only set what you need to change.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LISTEN_PORT` | `8318` | Proxy listen port |
 | `TARGET_HOST` | `agentrouter.org` | Upstream hostname |
 | `TARGET_PORT` | `443` | Upstream port |
-| `REQUEST_TIMEOUT_MS` | `120000` | Request timeout |
-| `MODELS_CSV` | `claude-opus-4-6,claude-opus-4-7,claude-opus-4-8,glm-5.2,gpt-5.5` | Static model fallback list |
-| `WARMUP_INTERVAL_MS` | `180000` | WAF cookie refresh interval |
+| `REQUEST_TIMEOUT_MS` | `120000` | Per-request timeout (ms) |
+| `MODELS_CSV` | `claude-opus-4-6,...` | Static model fallback list |
+| `WARMUP_INTERVAL_MS` | `180000` | WAF cookie refresh interval (ms) |
 | `MAX_RETRIES` | `2` | Retry attempts on failure |
-| `RETRY_DELAY_MS` | `1000` | Base retry delay (doubles per attempt) |
-| `AR_API_KEY` | `""` | AgentRouter API key for auto model discovery (optional) |
-| `DISCOVERY_INTERVAL_MS` | `600000` | How often to refresh model list from upstream (10 min) |
+| `RETRY_DELAY_MS` | `1000` | Base retry delay, doubles per attempt (ms) |
+| `AR_API_KEY` | _(empty)_ | AgentRouter API key for auto model discovery |
+| `DISCOVERY_INTERVAL_MS` | `600000` | Model list refresh interval (ms) |
 
 ## Endpoints
 
 | Path | Method | Description |
 |------|--------|-------------|
+| `/health`, `/api/health` | GET | Status, WAF cookie state, circuit breaker, active streams |
 | `/v1/models`, `/models` | GET | List available models |
-| `/health`, `/api/health` | GET | Upstream status, WAF cookie state, circuit breaker |
-| `/v1/messages`, `/v1/chat/completions` | POST | Proxied to upstream |
-| `/messages` | POST | Rewritten to `/v1/messages` |
+| `/v1/messages` | POST | Proxied to upstream (Anthropic format) |
+| `/messages` | POST | Rewritten to `/v1/messages`, then proxied |
+| `/v1/chat/completions` | POST | Proxied to upstream (pass-through) |
+
+## Usage
+
+### Standalone (direct requests)
+
+Send Anthropic-format requests directly:
+
+```bash
+curl http://localhost:8318/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -d '{
+    "model": "claude-opus-4-8",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Hello"}],
+    "stream": true
+  }'
+```
+
+### With a router (9Router, LiteLLM, etc.)
+
+If your router runs in Docker, both containers need to be on the same network:
+
+```bash
+# Option A: copy and edit the override example
+cp docker-compose.override.yml.example docker-compose.override.yml
+# Edit docker-compose.override.yml to set your network name
+docker compose up -d --build
+
+# Option B: connect manually
+docker network connect YOUR_NETWORK agentrouter-proxy
+```
+
+Then configure the router to use `http://agentrouter-proxy:8318` as the upstream URL. The proxy is reachable by container name via Docker DNS.
+
+### With opencode
+
+Add a provider to your `opencode.jsonc`:
+
+```jsonc
+"provider": {
+  "your-provider-name": {
+    "npm": "@ai-sdk/openai-compatible",
+    "name": "AgentRouter",
+    "options": {
+      "baseURL": "http://localhost:8318/v1"
+    },
+    "models": {
+      "claude-opus-4-8": {
+        "id": "claude-opus-4-8",
+        "name": "Claude Opus 4.8",
+        "vision": true, "reasoning": true, "tool_call": true,
+        "cost": { "input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25 },
+        "limit": { "context": 1000000, "output": 128000 }
+      }
+    }
+  }
+}
+```
+
+If opencode is on a different machine, replace `localhost` with the host's LAN IP.
 
 ## Model Auto-Discovery
 
-AgentRouter's available models change periodically without notice. The proxy can dynamically discover them:
+Set `AR_API_KEY` in your `.env` to enable dynamic model listing:
 
-1. Set `AR_API_KEY` to your AgentRouter API key
-2. On startup and every 10 minutes (`DISCOVERY_INTERVAL_MS`), the proxy queries `agentrouter.org/v1/models`
-3. If discovery succeeds, the returned model list replaces the static `MODELS_CSV`
-4. The health endpoint shows `modelSource: "dynamic"` vs `"static"`
+```bash
+AR_API_KEY=your-agentrouter-api-key
+```
 
-Without `AR_API_KEY`, the proxy uses the static `MODELS_CSV` list. No model is ever blocked — unknown model IDs in requests are forwarded as-is to the upstream.
+The proxy queries `agentrouter.org/v1/models` on startup and every 10 minutes. The health endpoint shows `modelSource: "dynamic"` when active.
+
+Without `AR_API_KEY`, the static `MODELS_CSV` list is used. Unknown model IDs in requests are always forwarded as-is.
+
+## Model Reference
+
+| Model | Context | Output | Vision | Cost (in/out $/MTok) |
+|-------|---------|--------|--------|---------------------|
+| `claude-opus-4-6` | 1M | 128k | yes (1568px) | 5 / 25 |
+| `claude-opus-4-7` | 1M | 128k | yes (2576px) | 5 / 25 |
+| `claude-opus-4-8` | 1M | 128k | yes (2576px) | 5 / 25 |
+| `glm-5.2` | 1M | 131k | untested | 1.4 / 4.4 |
+
+Opus 4.8 uses ~35% fewer output tokens than 4.7 at the same effort level.
+
+## Running Tests
+
+Tests use Node.js 22+ built-in test runner (zero dependencies):
+
+```bash
+node --test tests/proxy.test.mjs
+```
 
 ## Known Limitations
 
 | Issue | Cause | Workaround |
 |-------|-------|------------|
-| `NoChannelError` (503) | AgentRouter has no available channel for the model | Retry or switch to a different model |
-| `content-blocked` (400) | Upstream content moderation | Rephrase the request |
-| Alibaba ALB 503 | Transient infrastructure issue | Proxy retry logic handles it |
+| `NoChannelError` (503) | No available upstream channel | Retry or switch model |
+| `content-blocked` (400) | Upstream content moderation | Rephrase request |
+| Alibaba ALB 503 | Transient WAF issue | Proxy retry handles it |
 | `gpt-5.5` always 403 | Insufficient upstream quota | Omit from config |
 | `glm-5.2` 429 | TPM rate limit | Wait and retry |
 

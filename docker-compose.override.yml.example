@@ -1,0 +1,17 @@
+# docker-compose.override.yml — local overrides (git-ignored)
+#
+# Copy this file to docker-compose.override.yml and edit as needed.
+# Docker Compose automatically merges it with docker-compose.yml.
+#
+# Example: join an existing Docker network (e.g. 9Router's network)
+# so the proxy is reachable by container name from other services.
+
+services:
+  agentrouter-proxy:
+    networks:
+      - proxy-net
+
+networks:
+  proxy-net:
+    external: true
+    name: 9router-net          # change to your network name

@@ -12,7 +12,7 @@ const {
   MODELS_CSV = "claude-opus-4-6,claude-opus-4-7,claude-opus-4-8,glm-5.2,gpt-5.5",
   WARMUP_INTERVAL_MS = "180000",
   MAX_RETRIES = "2",
-  RETRY_DELAY_MS = "500",
+  RETRY_DELAY_MS = "1000",
   AR_API_KEY = "",
   DISCOVERY_INTERVAL_MS = "600000",
 } = process.env;
