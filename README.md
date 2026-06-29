@@ -99,7 +99,7 @@ curl http://localhost:20128/v1/chat/completions \
 
 Edit `~/.config/opencode/opencode.jsonc`:
 
-```json
+```jsonc
 "9router": {
   "npm": "@ai-sdk/openai-compatible",
   "name": "9Router",
@@ -110,21 +110,21 @@ Edit `~/.config/opencode/opencode.jsonc`:
     "claude-opus-4-6": {
       "id": "AG/claude-opus-4-6",
       "name": "Claude Opus 4.6",
-      "reasoning": true, "tool_call": true,
+      "vision": true, "reasoning": true, "tool_call": true,
       "cost": { "input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25 },
       "limit": { "context": 1000000, "output": 128000 }
     },
     "claude-opus-4-7": {
       "id": "AG/claude-opus-4-7",
       "name": "Claude Opus 4.7",
-      "reasoning": true, "tool_call": true,
+      "vision": true, "reasoning": true, "tool_call": true,
       "cost": { "input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25 },
       "limit": { "context": 1000000, "output": 128000 }
     },
     "claude-opus-4-8": {
       "id": "AG/claude-opus-4-8",
       "name": "Claude Opus 4.8",
-      "reasoning": true, "tool_call": true,
+      "vision": true, "reasoning": true, "tool_call": true,
       "cost": { "input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25 },
       "limit": { "context": 1000000, "output": 128000 }
     },
@@ -194,7 +194,7 @@ Each model entry supports these fields:
 }
 ```
 
-Set `"vision": false` on models that don't support images to prevent opencode from sending image content blocks. All three Claude Opus models support vision; GLM-5.2 vision capability is untested.
+Set `"vision": false` on models that don't support images to prevent opencode from sending image content blocks.
 
 ---
 
