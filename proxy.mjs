@@ -1,5 +1,6 @@
 import http from "node:http";
 import https from "node:https";
+import { resolve4 } from "node:dns/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const {
@@ -10,12 +11,13 @@ const {
   MODELS_CSV = "claude-opus-4-6,claude-opus-4-7,claude-opus-4-8,glm-5.2,gpt-5.5",
   WARMUP_INTERVAL_MS = "180000",
   MAX_RETRIES = "2",
-  RETRY_DELAY_MS = "1000",
+  RETRY_DELAY_MS = "500",
   AR_API_KEY = "",
   DISCOVERY_INTERVAL_MS = "600000",
 } = process.env;
 
 const PORT = parseInt(LISTEN_PORT, 10);
+const TARGET_PORT_INT = parseInt(TARGET_PORT, 10);
 const TIMEOUT = parseInt(REQUEST_TIMEOUT_MS, 10);
 const WARMUP_INTERVAL = parseInt(WARMUP_INTERVAL_MS, 10);
 const MAX_RETRIES_NUM = parseInt(MAX_RETRIES, 10);
@@ -32,10 +34,9 @@ const SSE_EOM = "event: message_stop";
 
 const AGENT = new https.Agent({
   keepAlive: true,
-  keepAliveMsecs: 60000,
+  keepAliveMsecs: 1000,
   maxSockets: 64,
   maxFreeSockets: 16,
-  timeout: 120000,
   scheduling: "lifo",
 });
 
@@ -90,7 +91,7 @@ async function fetchModels() {
       const req = https.request(
         {
           hostname: TARGET_HOST,
-          port: parseInt(TARGET_PORT, 10),
+          port: TARGET_PORT_INT,
           path: "/v1/models",
           method: "GET",
           headers: {
@@ -98,10 +99,10 @@ async function fetchModels() {
             "User-Agent": "agentrouter-spoof-proxy/1.0",
             Accept: "application/json",
           },
-          agent: AGENT,
-          rejectUnauthorized: true,
-          timeout: 15000,
-        },
+            agent: AGENT,
+            rejectUnauthorized: true,
+            timeout: 15000,
+          },
         (res) => {
           const chunks = [];
           res.on("data", (c) => chunks.push(c));
@@ -146,9 +147,7 @@ let dnsExpiry = 0;
 async function resolveDns() {
   const ts = new Date().toISOString();
   try {
-    const { Resolver } = await import("node:dns/promises");
-    const resolver = new Resolver();
-    const addresses = await resolver.resolve4(TARGET_HOST);
+    const addresses = await resolve4(TARGET_HOST);
     cachedIps = addresses;
     dnsExpiry = Date.now() + 300000;
     log(ts, `DNS resolved ${TARGET_HOST} → ${addresses.join(", ")}`);
@@ -157,11 +156,6 @@ async function resolveDns() {
       log(ts, `DNS resolution failed for ${TARGET_HOST}`);
     }
   }
-}
-
-function getTargetIp() {
-  if (Date.now() > dnsExpiry) return null;
-  return cachedIps.length ? cachedIps[0] : null;
 }
 
 // ── WAF Cookie Store ──
@@ -188,18 +182,18 @@ async function warmup() {
         const req = https.request(
           {
             hostname: TARGET_HOST,
-            port: parseInt(TARGET_PORT, 10),
+            port: TARGET_PORT_INT,
             path: "/",
             method: "GET",
             headers: WARMUP_HEADERS,
-            agent: AGENT,
+            agent: false,
             rejectUnauthorized: true,
             timeout: 10000,
           },
           (res) => {
             const waf = extractWafCookies(res);
             res.resume();
-            resolve(waf);
+            res.on("end", () => resolve(waf));
           }
         );
         req.on("error", reject);
@@ -321,6 +315,7 @@ const server = http.createServer((req, res) => {
   const body = [];
   let upstreamReq = null;
   let proxyDone = false;
+  let hasEnded = false;
 
   function finishProxy() {
     if (proxyDone) return;
@@ -330,6 +325,7 @@ const server = http.createServer((req, res) => {
 
   req.on("data", (c) => body.push(c));
   req.on("end", () => {
+    hasEnded = true;
     const path = rewritePath(rawPath);
 
     const upstreamHeaders = {
@@ -342,17 +338,6 @@ const server = http.createServer((req, res) => {
 
     if (wafCookieStr) upstreamHeaders["Cookie"] = wafCookieStr;
 
-    let cleanBody = null;
-    if (body.length) {
-      try {
-        const parsed = JSON.parse(Buffer.concat(body).toString());
-        if (parsed.stream_options && !parsed.stream) delete parsed.stream_options;
-        cleanBody = JSON.stringify(parsed);
-      } catch {
-        cleanBody = Buffer.concat(body);
-      }
-    }
-
     if (isCircuitOpen()) {
       log(ts, `${method} ${rawPath} -> REJECTED (circuit open)`);
       respondJson(res, 503, {
@@ -364,17 +349,12 @@ const server = http.createServer((req, res) => {
     activeStreams++;
 
     async function doRequest(attempt) {
-      const ip = getTargetIp();
-      if (!ip && cachedIps.length) {
-        resolveDns().catch(() => {});
-      }
-
       log(ts, `${method} ${rawPath} -> ${path} (attempt ${attempt + 1})`);
 
       return new Promise((resolveProxy) => {
         const opts = {
           hostname: TARGET_HOST,
-          port: parseInt(TARGET_PORT, 10),
+          port: TARGET_PORT_INT,
           path,
           method,
           headers: upstreamHeaders,
@@ -529,7 +509,8 @@ const server = http.createServer((req, res) => {
           resolveProxy();
         }
 
-        if (cleanBody) upstreamReq.write(cleanBody);
+        const rawBody = Buffer.concat(body);
+        if (rawBody.length) upstreamReq.write(rawBody);
         upstreamReq.end();
       });
     }
@@ -539,7 +520,7 @@ const server = http.createServer((req, res) => {
 
   // Client disconnect — stop upstream request
   req.on("close", () => {
-    if (!proxyDone && upstreamReq && !upstreamReq.destroyed) {
+    if (!proxyDone && upstreamReq && !upstreamReq.destroyed && !hasEnded) {
       upstreamReq.destroy();
       finishProxy();
     }
