@@ -157,6 +157,47 @@ Select `9router/claude-opus-4-8` as your active model and start chatting.
 
 ---
 
+## Model Modalities & opencode Config
+
+### Capabilities per model
+
+| Model | Input | Output | Vision | Reasoning | Tool Call |
+|-------|-------|--------|--------|-----------|-----------|
+| `claude-opus-4-6` | text, image (1568px cap) | text | ✅ | ✅ | ✅ |
+| `claude-opus-4-7` | text, image (2576px high-res) | text | ✅ | ✅ | ✅ |
+| `claude-opus-4-8` | text, image (2576px high-res) | text | ✅ | ✅ | ✅ |
+| `glm-5.2` | text | text | untested | ✅ | ✅ |
+
+All Claude Opus models accept `image` content blocks via Anthropic Messages API (base64 or URL). The proxy passes the request body through unchanged — image data reaches the upstream as-is.
+
+### opencode config reference
+
+Each model entry supports these fields:
+
+```jsonc
+"claude-opus-4-8": {
+  "id": "AG/claude-opus-4-8",       // model ID sent to 9Router
+  "name": "Claude Opus 4.8",         // display name in TUI
+  "reasoning": true,                 // enables extended/adaptive thinking
+  "tool_call": true,                 // enables tool/function calling
+  "vision": true,                    // enables image input support
+  "cost": {
+    "input": 5,                      // $/MTok input
+    "output": 25,                    // $/MTok output
+    "cache_read": 0.5,              // $/MTok cache read
+    "cache_write": 6.25             // $/MTok cache write
+  },
+  "limit": {
+    "context": 1000000,             // max context window (tokens)
+    "output": 128000                // max output tokens
+  }
+}
+```
+
+Set `"vision": false` on models that don't support images to prevent opencode from sending image content blocks. All three Claude Opus models support vision; GLM-5.2 vision capability is untested.
+
+---
+
 ## Environment Variables
 
 | Variable | Default | Description |
