@@ -15,6 +15,8 @@ export class MockUpstream {
     this.received = [];
     this._server = null;
     this._port = null;
+    this.reqDestroyed = false;
+    this._req = null;
   }
 
   setScenario(s) { this._scenario = s; }
@@ -50,6 +52,11 @@ export class MockUpstream {
   }
 
   _route(req, res, body) {
+    this._req = req;
+    this.reqDestroyed = false;
+    req.socket.on("close", () => {
+      if (!res.writableEnded) this.reqDestroyed = true;
+    });
     if (req.method === "GET") {
       return this._get(req, res, body);
     }
@@ -121,6 +128,12 @@ export class MockUpstream {
         res.write(SSE_CHUNKS[1]);
         await sleep(1);
         req.socket.destroy();
+        break;
+
+      case "slow_stream":
+        this._sse(res, async () => {
+          for (const c of SSE_CHUNKS) { res.write(c); await sleep(50); }
+        });
         break;
 
       case "hang":

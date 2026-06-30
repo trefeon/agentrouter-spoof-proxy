@@ -319,7 +319,7 @@ const server = http.createServer((req, res) => {
 
   // ── Proxy ──
   const body = [];
-  let currentUpstreamReq = null;   // tracks the CURRENT attempt's request (scoped per-attempt via closure)
+  let currentUpstreamReq = null;
   let proxyDone = false;
   let hasEnded = false;
 
@@ -397,6 +397,8 @@ const server = http.createServer((req, res) => {
         let errorHandled = false;  // prevent double-invocation of handleError (timeout fires error)
         let idleTimer = null;      // SSE idle timeout
         let reqTimer = null;       // upstream request timeout (manual, more reliable than opts.timeout)
+        let isSse = false;
+        let sawMessageStop = false;
 
         function clearIdleTimer() {
           if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
@@ -446,7 +448,11 @@ const server = http.createServer((req, res) => {
           recordSuccess();
 
           const filteredHeaders = filterHeaders(upstreamRes.headers);
-          const isSse = (upstreamRes.headers["content-type"] || "").includes("text/event-stream");
+          isSse = (upstreamRes.headers["content-type"] || "").includes("text/event-stream");
+          if (isSse) {
+            filteredHeaders["X-Accel-Buffering"] = "no";
+            filteredHeaders["Cache-Control"] = "no-cache";
+          }
 
           if (!safeWriteHead(statusCode, filteredHeaders)) {
             // Headers already sent (race condition) — drain upstream, don't double-send
@@ -476,7 +482,6 @@ const server = http.createServer((req, res) => {
           }
 
           // Streaming (200 + SSE)
-          let sawMessageStop = false;
           let streamFinished = false;  // prevent double finish from end+close
 
           function finishStream() {
@@ -513,8 +518,13 @@ const server = http.createServer((req, res) => {
             if (isSse && chunk.includes(SSE_EOM)) sawMessageStop = true;
             const canContinue = safeWrite(chunk);
             if (canContinue === false && !res.writableEnded) {
-              upstreamRes.pause();
-              res.once("drain", () => { if (!streamFinished) upstreamRes.resume(); });
+              if (res.socket?.destroyed || res.destroyed) {
+                safeEnd();
+                finishStream();
+              } else {
+                upstreamRes.pause();
+                res.once("drain", () => { if (!streamFinished) upstreamRes.resume(); });
+              }
             }
           });
 
@@ -631,11 +641,6 @@ const server = http.createServer((req, res) => {
     });
   });
 
-  // Client disconnect — stop upstream request
-  // IMPORTANT: req.on("close") fires on HTTP/1.1 keepalive when connection is reused
-  // for the next request. We must NOT destroy upstream or decrement activeStreams in that case.
-  // The streaming handlers manage cleanup. Only destroy upstream if client truly disconnected
-  // (body not received yet or socket destroyed).
   req.on("close", () => {
     if (proxyDone) return;
     const trulyDisconnected = !hasEnded || req.socket?.destroyed;

@@ -5,7 +5,9 @@ import { request as httpReq } from "node:http";
 import net from "node:net";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { setMaxListeners } from "node:events";
 import { MockUpstream } from "./mock-upstream.mjs";
+setMaxListeners(50);
 
 const PROXY_DIR = path.resolve(import.meta.dirname, "..");
 
@@ -52,6 +54,18 @@ async function waitForProxy(port, timeoutMs = 10000) {
     await sleep(100);
   }
   throw new Error(`proxy did not become healthy within ${timeoutMs}ms`);
+}
+
+async function waitActiveStreams(port, target, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const h = await fetch(`http://127.0.0.1:${port}/health`);
+    const body = JSON.parse(h.body);
+    if (body.activeStreams === target) return body.activeStreams;
+    await sleep(50);
+  }
+  const h = await fetch(`http://127.0.0.1:${port}/health`);
+  return JSON.parse(h.body).activeStreams;
 }
 
 async function collectSse(request, timeoutMs = 5000) {
@@ -411,6 +425,88 @@ describe("agentrouter-spoof-proxy", () => {
       const h = await fetch(`http://127.0.0.1:${proxyPort}/health`);
       const body = JSON.parse(h.body);
       assert.equal(body.activeStreams, 0, "no streams leaked after sequential requests");
+    });
+  });
+
+  // ── X-Accel-Buffering header ──
+  describe("SSE anti-buffering headers", () => {
+    it("adds X-Accel-Buffering and Cache-Control to SSE responses", async () => {
+      mock.setScenario("success");
+      const { res } = await collectSse(fetchStream(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+        method: "POST",
+        headers: proxyHeaders(),
+        body: chatBody(),
+      }));
+      assert.equal(res.headers["x-accel-buffering"], "no");
+      assert.ok(res.headers["cache-control"]?.includes("no-cache"));
+    });
+  });
+
+  // ── Client disconnect mid-stream ──
+  describe("client disconnect", () => {
+    it("cleans up when client disconnects mid-stream", async () => {
+      mock.setScenario("slow_stream");
+      const h1 = await fetch(`http://127.0.0.1:${proxyPort}/health`);
+      const before = JSON.parse(h1.body).activeStreams;
+
+      mock.reqDestroyed = false;
+      const req = fetchStream(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+        method: "POST",
+        headers: proxyHeaders(),
+        body: chatBody(),
+      });
+
+      await sleep(200);
+      req.destroy();
+      const after = await waitActiveStreams(proxyPort, before);
+      assert.equal(after, before, "activeStreams should return to original after client disconnect");
+    });
+  });
+
+  // ── Hop-by-hop headers ──
+  describe("hop-by-hop headers", () => {
+    it("does not copy hop-by-hop headers from client request to upstream", async () => {
+      mock.setScenario("success");
+      mock.received.length = 0;
+      await collectSse(fetchStream(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+        method: "POST",
+        headers: {
+          ...proxyHeaders(),
+          connection: "close",
+          "transfer-encoding": "chunked",
+          "x-custom-hop": "should-not-forward",
+        },
+        body: chatBody(),
+      }));
+      const req = mock.received.find((r) => r.method === "POST" && r.url.startsWith("/v1/messages"));
+      assert.ok(req, "upstream received POST");
+      // The proxy only forwards specific headers: authorization, x-api-key, anthropic-version
+      assert.equal(req.headers.authorization, "Bearer sk_test", "authorization forwarded");
+      assert.ok(req.headers["user-agent"]?.includes("claude-cli"), "user-agent spoofed");
+      // connection, transfer-encoding should not be in upstreamHeaders
+      // (Node.js will add its own Connection: keep-alive, but not from client request)
+      assert.equal(req.headers["x-custom-hop"], undefined, "custom hop-by-hop not forwarded");
+    });
+  });
+
+  // ── Concurrent parallel streams ──
+  describe("concurrent parallel streams", () => {
+    it("handles 3 parallel SSE streams without leaks", { timeout: 5000 }, async () => {
+      mock.setScenario("success");
+      const results = await Promise.all(
+        Array.from({ length: 3 }, () =>
+          collectSse(fetchStream(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+            method: "POST",
+            headers: proxyHeaders(),
+            body: chatBody(),
+          }))
+        )
+      );
+      results.forEach(({ events }) => {
+        assert.ok(events.some((e) => e.includes("message_stop")), "each stream should complete");
+      });
+      const after = await waitActiveStreams(proxyPort, 0);
+      assert.equal(after, 0, "no streams leaked after 3 concurrent streams");
     });
   });
 
