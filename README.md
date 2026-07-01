@@ -60,7 +60,8 @@ All settings have sensible defaults. Only set what you need to change.
 | `LISTEN_PORT` | `8318` | Proxy listen port |
 | `TARGET_HOST` | `agentrouter.org` | Upstream hostname |
 | `TARGET_PORT` | `443` | Upstream port |
-| `REQUEST_TIMEOUT_MS` | `120000` | Per-request timeout (ms) |
+| `REQUEST_TIMEOUT_MS` | `300000` | Max time to wait for upstream first byte (ms). Raised from 120s for large-context tasks. |
+| `SSE_IDLE_TIMEOUT_MS` | `600000` | SSE idle timeout: if no streaming data arrives within this window, stream is terminated (ms) |
 | `MODELS_CSV` | `claude-opus-4-6,...` | Static model fallback list |
 | `WARMUP_INTERVAL_MS` | `180000` | WAF cookie refresh interval (ms) |
 | `MAX_RETRIES` | `2` | Retry attempts on failure |

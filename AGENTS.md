@@ -242,7 +242,8 @@ Health endpoint shows `modelSource: "dynamic"` when active.
 | `LISTEN_PORT` | `8318` | Listen port |
 | `TARGET_HOST` | `agentrouter.org` | Upstream host |
 | `TARGET_PORT` | `443` | Upstream port |
-| `REQUEST_TIMEOUT_MS` | `120000` | Request timeout (ms) |
+| `REQUEST_TIMEOUT_MS` | `300000` | Request timeout (ms, raised from 120s) |
+| `SSE_IDLE_TIMEOUT_MS` | `600000` | SSE idle timeout — terminates hung streams (ms) |
 | `MODELS_CSV` | `claude-opus-4-6,...` | Static model list |
 | `WARMUP_INTERVAL_MS` | `180000` | WAF cookie refresh (ms) |
 | `MAX_RETRIES` | `2` | Retry attempts |

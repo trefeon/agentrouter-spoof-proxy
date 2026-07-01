@@ -11,7 +11,7 @@ services:
       - LISTEN_PORT=${LISTEN_PORT:-8318}
       - TARGET_HOST=${TARGET_HOST:-agentrouter.org}
       - TARGET_PORT=${TARGET_PORT:-443}
-      - REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS:-120000}
+      - REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS:-300000}
       - MODELS_CSV=${MODELS_CSV:-claude-opus-4-6,claude-opus-4-7,claude-opus-4-8,glm-5.2,gpt-5.5}
       - WARMUP_INTERVAL_MS=${WARMUP_INTERVAL_MS:-180000}
       - MAX_RETRIES=${MAX_RETRIES:-2}
@@ -19,6 +19,8 @@ services:
       - AR_API_KEY=${AR_API_KEY:-}
       - DISCOVERY_INTERVAL_MS=${DISCOVERY_INTERVAL_MS:-600000}
       - INJECT_SYSTEM_PROMPT=${INJECT_SYSTEM_PROMPT:-}
+      - SSE_IDLE_TIMEOUT_MS=${SSE_IDLE_TIMEOUT_MS:-600000}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
     sysctls:
       - net.ipv4.tcp_keepalive_time=60
       - net.ipv4.tcp_keepalive_intvl=10

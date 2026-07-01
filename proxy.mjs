@@ -8,7 +8,7 @@ const {
   TARGET_PROTOCOL = "https",
   TARGET_HOST = "agentrouter.org",
   TARGET_PORT = "443",
-  REQUEST_TIMEOUT_MS = "120000",
+  REQUEST_TIMEOUT_MS = "300000",
   MODELS_CSV = "claude-opus-4-6,claude-opus-4-7,claude-opus-4-8,glm-5.2,gpt-5.5",
   WARMUP_INTERVAL_MS = "180000",
   MAX_RETRIES = "2",
@@ -16,6 +16,8 @@ const {
   AR_API_KEY = "",
   DISCOVERY_INTERVAL_MS = "600000",
   INJECT_SYSTEM_PROMPT = "",
+  SSE_IDLE_TIMEOUT_MS = "600000",
+  LOG_LEVEL = "info",
 } = process.env;
 
 const PORT = parseInt(LISTEN_PORT, 10);
@@ -25,6 +27,8 @@ const WARMUP_INTERVAL = parseInt(WARMUP_INTERVAL_MS, 10);
 const MAX_RETRIES_NUM = parseInt(MAX_RETRIES, 10);
 const RETRY_DELAY = parseInt(RETRY_DELAY_MS, 10);
 const DISCOVERY_INTERVAL = parseInt(DISCOVERY_INTERVAL_MS, 10);
+const SSE_IDLE = parseInt(SSE_IDLE_TIMEOUT_MS, 10);
+const IS_DEBUG = LOG_LEVEL === "debug";
 
 const HOP_BY_HOP = new Set([
   "transfer-encoding", "connection", "keep-alive",
@@ -246,6 +250,14 @@ function recordFailure() {
 function log(ts, msg) {
   console.log(`[${ts}] ${msg}`);
 }
+function logDebug(ts, msg) {
+  if (IS_DEBUG) console.log(`[${ts}] [DEBUG] ${msg}`);
+}
+
+function truncate(str, max = 500) {
+  if (!str || str.length <= max) return str;
+  return str.slice(0, max) + `... (${str.length - max} more bytes)`;
+}
 
 function filterHeaders(headers) {
   if (!headers) return {};
@@ -311,8 +323,7 @@ function isRetryable(statusCode, errorMessage) {
   return false;
 }
 
-// ── SSE idle timeout (5 min no data = hung stream) ──
-const SSE_IDLE_TIMEOUT_MS = 300000;
+// ── SSE idle timeout (default 10 min no data = hung stream) ──
 
 // ── Server ──
 
@@ -382,6 +393,7 @@ const server = http.createServer((req, res) => {
   req.on("end", () => {
     hasEnded = true;
     const path = rewritePath(rawPath);
+    logDebug(ts, `${method} ${rawPath} -> REQUEST BODY: ${truncate(Buffer.concat(body).toString("utf8"), 1000)}`);
 
     const upstreamHeaders = {
       ...SPOOF_HEADERS,
@@ -509,7 +521,13 @@ const server = http.createServer((req, res) => {
           }
 
           // Streaming (200 + SSE)
-          let streamFinished = false;  // prevent double finish from end+close
+          const reqStart = Date.now();
+          let firstByteMs = 0;
+          let streamFinished = false;
+          let chunkCount = 0;
+
+          firstByteMs = Date.now() - reqStart;
+          logDebug(ts, `${method} ${rawPath} <- TTFB ${firstByteMs}ms, status 200, SSE=${isSse}`);
 
           function finishStream() {
             if (streamFinished) return;
@@ -525,14 +543,14 @@ const server = http.createServer((req, res) => {
             if (isSse && !streamFinished) {
               idleTimer = setTimeout(() => {
                 if (streamFinished) return;
-                log(ts, `${method} ${rawPath} <- SSE IDLE TIMEOUT (${SSE_IDLE_TIMEOUT_MS / 1000}s no data)`);
+                log(ts, `${method} ${rawPath} <- SSE IDLE TIMEOUT (${SSE_IDLE / 1000}s no data)`);
                 if (!sawMessageStop) {
                   safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`);
                 }
                 safeEnd();
                 if (!upstreamReq.destroyed) upstreamReq.destroy();
                 finishStream();
-              }, SSE_IDLE_TIMEOUT_MS);
+              }, SSE_IDLE);
               idleTimer.unref();
             }
           }
@@ -542,6 +560,8 @@ const server = http.createServer((req, res) => {
           upstreamRes.on("data", (chunk) => {
             if (streamFinished) return;
             resetIdleTimer();
+            chunkCount++;
+            logDebug(ts, `${method} ${rawPath} <- CHUNK #${chunkCount} ${chunk.length}b, elapsed ${Date.now() - reqStart}ms`);
             if (isSse && chunk.includes(SSE_EOM)) sawMessageStop = true;
             const canContinue = safeWrite(chunk);
             if (canContinue === false && !res.writableEnded) {
@@ -558,7 +578,7 @@ const server = http.createServer((req, res) => {
           upstreamRes.on("end", () => {
             if (streamFinished) return;
             safeEnd();
-            log(ts, `${method} ${rawPath} <- ${statusCode} (stream complete)`);
+            log(ts, `${method} ${rawPath} <- ${statusCode} (stream complete, ${Date.now() - reqStart}ms, ${chunkCount} chunks)`);
             finishStream();
           });
 
@@ -575,7 +595,7 @@ const server = http.createServer((req, res) => {
           upstreamRes.on("close", () => {
             if (streamFinished) return;
             if (!res.writableEnded) {
-              log(ts, `${method} ${rawPath} <- UPSTREAM CLOSED (connection terminated prematurely)`);
+              log(ts, `${method} ${rawPath} <- UPSTREAM CLOSED (connection terminated prematurely, ${Date.now() - reqStart}ms, ${chunkCount} chunks)`);
               if (isSse && !sawMessageStop) {
                 safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`);
               }
