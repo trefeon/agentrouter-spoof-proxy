@@ -17,6 +17,8 @@ const {
   DISCOVERY_INTERVAL_MS = "600000",
   INJECT_SYSTEM_PROMPT = "",
   SSE_IDLE_TIMEOUT_MS = "600000",
+  SSE_CHUNK_TIMEOUT_MS = "30000",
+  RESPONSE_TIMEOUT_MS = "30000",
   LOG_LEVEL = "info",
 } = process.env;
 
@@ -28,6 +30,8 @@ const MAX_RETRIES_NUM = parseInt(MAX_RETRIES, 10);
 const RETRY_DELAY = parseInt(RETRY_DELAY_MS, 10);
 const DISCOVERY_INTERVAL = parseInt(DISCOVERY_INTERVAL_MS, 10);
 const SSE_IDLE = parseInt(SSE_IDLE_TIMEOUT_MS, 10);
+const SSE_CHUNK_TIMEOUT = parseInt(SSE_CHUNK_TIMEOUT_MS, 10);
+const RESPONSE_TIMEOUT = parseInt(RESPONSE_TIMEOUT_MS, 10);
 const IS_DEBUG = LOG_LEVEL === "debug";
 
 const HOP_BY_HOP = new Set([
@@ -436,15 +440,24 @@ const server = http.createServer((req, res) => {
         let errorHandled = false;  // prevent double-invocation of handleError (timeout fires error)
         let idleTimer = null;      // SSE idle timeout
         let reqTimer = null;       // upstream request timeout (manual, more reliable than opts.timeout)
+        let responseTimer = null;  // upstream response timeout (first byte)
+        let chunkTimer = null;     // per-chunk stall timeout (SSE)
+        let keepaliveTimer = null; // client keepalive ping injector
         let isSse = false;
         let sawMessageStop = false;
+        let upstreamResponded = false;
 
         function clearIdleTimer() {
           if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
           if (reqTimer) { clearTimeout(reqTimer); reqTimer = null; }
+          if (responseTimer) { clearTimeout(responseTimer); responseTimer = null; }
+          if (chunkTimer) { clearTimeout(chunkTimer); chunkTimer = null; }
+          if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
         }
 
         const upstreamReq = UPSTREAM_MODULE.request(opts, (upstreamRes) => {
+          upstreamResponded = true;
+          clearIdleTimer(); // clear response timeout — upstream responded
           const statusCode = upstreamRes.statusCode;
 
           // Handle WAF block: re-warmup and retry once
@@ -493,15 +506,13 @@ const server = http.createServer((req, res) => {
             filteredHeaders["Cache-Control"] = "no-cache";
           }
 
-          if (!safeWriteHead(statusCode, filteredHeaders)) {
-            // Headers already sent (race condition) — drain upstream, don't double-send
-            upstreamRes.resume();
-            finishProxy();
-            resolveProxy();
-            return;
-          }
-
           if (statusCode !== 200) {
+            if (!safeWriteHead(statusCode, filteredHeaders)) {
+              upstreamRes.resume();
+              finishProxy();
+              resolveProxy();
+              return;
+            }
             const errChunks = [];
             upstreamRes.on("data", (c) => errChunks.push(c));
             upstreamRes.on("end", () => {
@@ -520,14 +531,13 @@ const server = http.createServer((req, res) => {
             return;
           }
 
-          // Streaming (200 + SSE)
+          // 200 response — send headers immediately, detect empty SSE streams
+          const KEEPALIVE_THRESHOLD = 50;
           const reqStart = Date.now();
-          let firstByteMs = 0;
           let streamFinished = false;
           let chunkCount = 0;
-
-          firstByteMs = Date.now() - reqStart;
-          logDebug(ts, `${method} ${rawPath} <- TTFB ${firstByteMs}ms, status 200, SSE=${isSse}`);
+          let sawDataEvent = false;
+          let maxChunkSize = 0;
 
           function finishStream() {
             if (streamFinished) return;
@@ -537,7 +547,48 @@ const server = http.createServer((req, res) => {
             resolveProxy();
           }
 
-          // Set up SSE idle timeout — if no data for 5 min, abort
+          if (!safeWriteHead(200, filteredHeaders)) {
+            upstreamRes.resume();
+            finishStream();
+            return;
+          }
+
+          logDebug(ts, `${method} ${rawPath} <- TTFB ${Date.now() - reqStart}ms, status 200, SSE=${isSse}`);
+
+          function resetChunkTimer() {
+            if (chunkTimer && sawDataEvent) {
+              clearTimeout(chunkTimer); chunkTimer = null;
+            }
+            if (!sawDataEvent && chunkTimer) return;
+            if (isSse && !streamFinished) {
+              const timeout = sawDataEvent ? SSE_CHUNK_TIMEOUT : Math.min(60000, SSE_CHUNK_TIMEOUT);
+              chunkTimer = setTimeout(() => {
+                if (streamFinished) return;
+                if (!sawDataEvent) {
+                  log(ts, `${method} ${rawPath} <- KEEPALIVE-ONLY STREAM (${chunkCount} pings, no real data in ${timeout / 1000}s)`);
+                } else {
+                  log(ts, `${method} ${rawPath} <- SSE CHUNK TIMEOUT (${timeout / 1000}s no data)`);
+                }
+                if (!sawMessageStop) {
+                  safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`);
+                }
+                safeEnd();
+                if (!upstreamReq.destroyed) upstreamReq.destroy();
+                finishStream();
+              }, timeout);
+              chunkTimer.unref();
+            }
+          }
+
+          function startKeepalive() {
+            if (keepaliveTimer) return;
+            keepaliveTimer = setInterval(() => {
+              if (streamFinished || res.writableEnded) { clearInterval(keepaliveTimer); keepaliveTimer = null; return; }
+              try { res.write(":\n\n"); } catch { clearInterval(keepaliveTimer); keepaliveTimer = null; }
+            }, 10000);
+            keepaliveTimer.unref();
+          }
+
           function resetIdleTimer() {
             clearIdleTimer();
             if (isSse && !streamFinished) {
@@ -556,13 +607,18 @@ const server = http.createServer((req, res) => {
           }
 
           resetIdleTimer();
+          resetChunkTimer();
+          if (isSse) startKeepalive();
 
           upstreamRes.on("data", (chunk) => {
             if (streamFinished) return;
             resetIdleTimer();
+            resetChunkTimer();
             chunkCount++;
+            maxChunkSize = Math.max(maxChunkSize, chunk.length);
             logDebug(ts, `${method} ${rawPath} <- CHUNK #${chunkCount} ${chunk.length}b, elapsed ${Date.now() - reqStart}ms`);
-            if (isSse && chunk.includes(SSE_EOM)) sawMessageStop = true;
+            if (chunk.length > KEEPALIVE_THRESHOLD) sawDataEvent = true;
+            if (chunk.includes(SSE_EOM)) sawMessageStop = true;
             const canContinue = safeWrite(chunk);
             if (canContinue === false && !res.writableEnded) {
               if (res.socket?.destroyed || res.destroyed) {
@@ -577,14 +633,18 @@ const server = http.createServer((req, res) => {
 
           upstreamRes.on("end", () => {
             if (streamFinished) return;
+            if (isSse && !sawDataEvent) {
+              log(ts, `${method} ${rawPath} <- EMPTY SSE STREAM (${chunkCount} chunks, max ${maxChunkSize}b)`);
+            }
             safeEnd();
-            log(ts, `${method} ${rawPath} <- ${statusCode} (stream complete, ${Date.now() - reqStart}ms, ${chunkCount} chunks)`);
+            log(ts, `${method} ${rawPath} <- 200 (stream complete, ${Date.now() - reqStart}ms, ${chunkCount} chunks)`);
             finishStream();
           });
 
           upstreamRes.on("error", (e) => {
             if (streamFinished) return;
-            log(ts, `${method} ${rawPath} <- UPSTREAM STREAM ERROR: ${e.message}`);
+            const causeCode = e.cause?.code ? ` (cause: ${e.cause.code})` : "";
+            log(ts, `${method} ${rawPath} <- UPSTREAM STREAM ERROR: ${e.message}${causeCode}`);
             if (isSse && !sawMessageStop) {
               safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`);
             }
@@ -607,6 +667,16 @@ const server = http.createServer((req, res) => {
 
         // Track current upstream request for client-disconnect handler
         currentUpstreamReq = upstreamReq;
+
+        // Response timeout: fire if upstream doesn't send headers within RESPONSE_TIMEOUT
+        responseTimer = setTimeout(() => {
+          if (upstreamResponded) return;
+          if (errorHandled) return;
+          errorHandled = true;
+          clearIdleTimer();
+          if (!upstreamReq.destroyed) upstreamReq.destroy(new Error('upstream response timeout'));
+        }, RESPONSE_TIMEOUT);
+        responseTimer.unref();
 
         upstreamReq.on("timeout", () => {
           if (errorHandled) return;
