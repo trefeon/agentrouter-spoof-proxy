@@ -351,6 +351,12 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ── API root (OpenAI compatibility) ──
+  if (method === "GET" && (rawPath === "/v1" || rawPath === "/v1/")) {
+    respondJson(res, 200, { object: "list", data: modelsList });
+    return;
+  }
+
   // ── Proxy ──
   const body = [];
   let currentUpstreamReq = null;
@@ -390,6 +396,33 @@ const server = http.createServer((req, res) => {
     hasEnded = true;
     const path = rewritePath(rawPath);
     logDebug(ts, `${method} ${rawPath} -> REQUEST BODY: ${truncate(Buffer.concat(body).toString("utf8"), 1000)}`);
+
+    const rawBody = Buffer.concat(body);
+
+    // ── Validate body for POST endpoints ──
+    if (method === "POST") {
+      const needsBody = path === "/v1/messages" || path === "/v1/chat/completions"
+        || path.startsWith("/v1/messages?") || path.startsWith("/v1/chat/completions?");
+
+      if (needsBody && !rawBody.length) {
+        log(ts, `${method} ${rawPath} -> 400 EMPTY BODY`);
+        safeRespondJson(400, {
+          error: { code: "missing_body", message: "Request body is required", type: "proxy_error" },
+        });
+        return;
+      }
+
+      if (needsBody && rawBody.length) {
+        try { JSON.parse(rawBody.toString("utf8")); }
+        catch {
+          log(ts, `${method} ${rawPath} -> 400 INVALID JSON: ${truncate(rawBody.toString("utf8"), 200)}`);
+          safeRespondJson(400, {
+            error: { code: "invalid_json", message: "Request body must be valid JSON", type: "proxy_error" },
+          });
+          return;
+        }
+      }
+    }
 
     const upstreamHeaders = {
       ...SPOOF_HEADERS,
@@ -741,8 +774,8 @@ const server = http.createServer((req, res) => {
         }, TIMEOUT);
         reqTimer.unref();
 
-        const rawBody = injectPrompt(Buffer.concat(body), path);
-        if (rawBody.length) upstreamReq.write(rawBody);
+        const injectedBody = injectPrompt(rawBody, path);
+        if (injectedBody.length) upstreamReq.write(injectedBody);
         upstreamReq.end();
       });
     }
