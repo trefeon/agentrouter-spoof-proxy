@@ -809,8 +809,18 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
 // Prevent uncaught exceptions (e.g. ERR_HTTP_HEADERS_SENT race) from crashing
-process.on("uncaughtException", (err) => {
-  console.error(`[${new Date().toISOString()}] UNCAUGHT EXCEPTION: ${err.message}`);
+process.on("uncaughtException", (err, origin) => {
+  console.error(`[${new Date().toISOString()}] UNCAUGHT EXCEPTION (${origin}): ${err.message}`);
   console.error(err.stack);
   // Don't exit — let Docker health check restart if truly broken
+});
+
+// Catch promise rejections that slip through — log clearly instead of silent warning
+process.on("unhandledRejection", (reason, promise) => {
+  const ts = new Date().toISOString();
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  console.error(`[${ts}] UNHANDLED REJECTION: ${msg}`);
+  if (reason instanceof Error && reason.stack) {
+    console.error(reason.stack);
+  }
 });
