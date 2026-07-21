@@ -1,11 +1,15 @@
 import { UPSTREAM_MODULE, TARGET_HOST_VAL, TARGET_PORT_INT, AGENT } from "./config.mjs";
 import { log } from "./logger.mjs";
 
-const PROBE_INTERVAL = 60000;     // check every 60s
-const COOLDOWN_MS = 120000;       // block failed model for 2min
+const PROBE_INTERVAL = 60000;     // recovery probe every 60s
 const PROBE_TIMEOUT = 8000;       // probe deadline
+const BASE_COOLDOWN = 30000;      // 30s first offence
+const MAX_COOLDOWN = 600000;      // 10min max lock
 
 const failedUntil = new Map();    // model_id → timestamp
+const failCounts = new Map();     // model_id → consecutive failure count
+
+const BACKOFF = [30000, 60000, 120000, 300000, 600000]; // 30s, 1m, 2m, 5m, 10m
 
 export function isModelHealthy(modelId) {
   const ts = failedUntil.get(modelId);
@@ -20,10 +24,20 @@ export function getHealthyModels(models) {
 export function markModelFailed(modelId, statusCode) {
   if (!modelId) return;
   if (statusCode >= 500) {
-    failedUntil.set(modelId, Date.now() + COOLDOWN_MS);
+    const count = (failCounts.get(modelId) || 0) + 1;
+    failCounts.set(modelId, count);
+    const idx = Math.min(count - 1, BACKOFF.length - 1);
+    const cooldown = BACKOFF[idx];
+    failedUntil.set(modelId, Date.now() + cooldown);
     const ts = new Date().toISOString();
-    log(ts, `MODEL UNHEALTHY: ${modelId} (${statusCode}) — removed for ${COOLDOWN_MS / 1000}s`);
+    log(ts, `MODEL UNHEALTHY: ${modelId} (${statusCode}, #${count}) — locked for ${cooldown / 1000}s`);
   }
+}
+
+function clearModelLock(modelId) {
+  failedUntil.delete(modelId);
+  failCounts.delete(modelId);
+  log(new Date().toISOString(), `MODEL RECOVERED: ${modelId}`);
 }
 
 async function probeModel(modelId, wafCookie, spoofHeaders) {
@@ -64,19 +78,20 @@ let probeTimer = null;
 
 export function startProbeLoop(getModelsFn, getWafFn, spoofHeaders) {
   if (probeTimer) return;
-  // Background probing: only recover models, don't mark healthy ones as failed
   probeTimer = setInterval(async () => {
-    // Check only models that were previously failed — try to recover them
     if (failedUntil.size === 0) return;
-    const models = getModelsFn();
-    // Re-probe only still-failed models
     for (const [modelId, until] of failedUntil) {
       if (Date.now() > until) {
-        const waf = getWafFn();
-        const ok = await probeModel(modelId, waf, spoofHeaders);
+        const ok = await probeModel(modelId, getWafFn(), spoofHeaders);
         if (ok) {
-          failedUntil.delete(modelId);
-          log(new Date().toISOString(), `MODEL RECOVERED: ${modelId}`);
+          clearModelLock(modelId);
+        } else {
+          // Recovery probe still failing — extend lock
+          const count = (failCounts.get(modelId) || 0) + 1;
+          failCounts.set(modelId, count);
+          const idx = Math.min(count - 1, BACKOFF.length - 1);
+          failedUntil.set(modelId, Date.now() + BACKOFF[idx]);
+          log(new Date().toISOString(), `MODEL STILL DOWN: ${modelId} (#${count}) — extended for ${BACKOFF[idx] / 1000}s`);
         }
       }
     }
