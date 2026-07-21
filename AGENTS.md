@@ -288,6 +288,14 @@ Restart (see Step 8 for commands). Health endpoint shows `modelSource: "dynamic"
 | 502/504 | Upstream timeout/error | Check network, increase `REQUEST_TIMEOUT_MS` |
 | 429 | TPM rate limit | Wait and retry |
 
+## Tutorial Bahasa Indonesia
+
+Untuk panduan lengkap integrasi dengan **9Router** dalam **Bahasa Indonesia** (termasuk konfigurasi provider, import model, dan API key), lihat:
+
+👉 [`docs/panduan-9router.md`](docs/panduan-9router.md)
+
+---
+
 ## Architecture
 
 ```
@@ -307,6 +315,7 @@ Restart (see Step 8 for commands). Health endpoint shows `modelSource: "dynamic"
 | `.env.example` | All configurable environment variables |
 | `docker-compose.override.yml.example` | Network integration template |
 | `tests/` | Test suite (`node --test tests/proxy.test.mjs`) |
+| `docs/panduan-9router.md` | Panduan integrasi 9Router Bahasa Indonesia |
 
 ## Env Vars
 
