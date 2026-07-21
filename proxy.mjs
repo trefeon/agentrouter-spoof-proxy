@@ -1,58 +1,18 @@
 import http from "node:http";
-import https from "node:https";
 import { resolve4 } from "node:dns/promises";
 import { setTimeout as sleep } from "node:timers/promises";
+import * as cfg from "./src/config.mjs";
+import { log, logDebug } from "./src/logger.mjs";
+import { isCircuitOpen, recordSuccess, recordFailure, getConsecutiveFails } from "./src/circuit-breaker.mjs";
+import { getWafCookie, warmup } from "./src/waf.mjs";
+import { getModelsList, getModelSource, fetchModels } from "./src/models.mjs";
+import {
+  SSE_EOM, KEEPALIVE_THRESHOLD, MAX_BODY_SIZE,
+  truncate, filterHeaders, rewritePath, respondJson,
+  isWafBlock, isRetryable, injectPrompt,
+} from "./src/utils.mjs";
 
-const {
-  LISTEN_PORT = "8318",
-  TARGET_PROTOCOL = "https",
-  TARGET_HOST = "agentrouter.org",
-  TARGET_PORT = "443",
-  REQUEST_TIMEOUT_MS = "300000",
-  MODELS_CSV = "claude-opus-4-6,claude-opus-4-7,claude-opus-4-8,glm-5.2,gpt-5.5",
-  WARMUP_INTERVAL_MS = "180000",
-  MAX_RETRIES = "2",
-  RETRY_DELAY_MS = "1000",
-  AR_API_KEY = "",
-  DISCOVERY_INTERVAL_MS = "600000",
-  INJECT_SYSTEM_PROMPT = "",
-  SSE_IDLE_TIMEOUT_MS = "600000",
-  SSE_CHUNK_TIMEOUT_MS = "30000",
-  RESPONSE_TIMEOUT_MS = "30000",
-  LOG_LEVEL = "info",
-} = process.env;
-
-const PORT = parseInt(LISTEN_PORT, 10);
-const TARGET_PORT_INT = parseInt(TARGET_PORT, 10);
-const TIMEOUT = parseInt(REQUEST_TIMEOUT_MS, 10);
-const WARMUP_INTERVAL = parseInt(WARMUP_INTERVAL_MS, 10);
-const MAX_RETRIES_NUM = parseInt(MAX_RETRIES, 10);
-const RETRY_DELAY = parseInt(RETRY_DELAY_MS, 10);
-const DISCOVERY_INTERVAL = parseInt(DISCOVERY_INTERVAL_MS, 10);
-const SSE_IDLE = parseInt(SSE_IDLE_TIMEOUT_MS, 10);
-const SSE_CHUNK_TIMEOUT = parseInt(SSE_CHUNK_TIMEOUT_MS, 10);
-const RESPONSE_TIMEOUT = parseInt(RESPONSE_TIMEOUT_MS, 10);
-const IS_DEBUG = LOG_LEVEL === "debug";
-
-const HOP_BY_HOP = new Set([
-  "transfer-encoding", "connection", "keep-alive",
-  "proxy-authenticate", "proxy-authorization",
-  "te", "trailer", "upgrade",
-]);
-
-const SSE_EOM = "event: message_stop";
-
-const UPSTREAM_MODULE = TARGET_PROTOCOL === "http" ? http : https;
-
-const AGENT = new UPSTREAM_MODULE.Agent({
-  keepAlive: true,
-  keepAliveMsecs: 1000,
-  maxSockets: 64,
-  maxFreeSockets: 16,
-  scheduling: "lifo",
-});
-
-let activeStreams = 0;
+// ── Spoof headers ──
 
 const SPOOF_HEADERS = {
   "User-Agent": "claude-cli/2.1.92 (external, sdk-cli)",
@@ -72,255 +32,39 @@ const SPOOF_HEADERS = {
   "X-Stainless-Timeout": "600",
 };
 
-const WARMUP_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Accept-Encoding": "gzip, deflate, br",
-  Connection: "keep-alive",
-  "Upgrade-Insecure-Requests": "1",
-  "Sec-Fetch-Dest": "document",
-  "Sec-Fetch-Mode": "navigate",
-  "Sec-Fetch-Site": "none",
-  "Sec-Fetch-User": "?1",
-};
+// ── Shared state ──
 
-const STATIC_MODELS = MODELS_CSV.split(",").map((id) => ({
-  id: id.trim(),
-  object: "model",
-  created: 1626777600,
-  owned_by: "agentrouter",
-}));
+let activeStreams = 0;
 
-let modelsList = [...STATIC_MODELS];
-let modelSource = "static";
-
-async function fetchModels() {
-  if (!AR_API_KEY) return;
-  const ts = new Date().toISOString();
-  try {
-    const data = await new Promise((resolve, reject) => {
-      const req = UPSTREAM_MODULE.request(
-        {
-          hostname: TARGET_HOST,
-          port: TARGET_PORT_INT,
-          path: "/v1/models",
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${AR_API_KEY}`,
-            "User-Agent": "agentrouter-spoof-proxy/1.0",
-            Accept: "application/json",
-          },
-            agent: AGENT,
-            rejectUnauthorized: true,
-            timeout: 15000,
-          },
-        (res) => {
-          const chunks = [];
-          res.on("data", (c) => chunks.push(c));
-          res.on("end", () => {
-            const raw = Buffer.concat(chunks);
-            if (res.statusCode === 200) {
-              try { resolve(JSON.parse(raw)); }
-              catch { reject(new Error("bad json")); }
-            } else {
-              reject(new Error(`status ${res.statusCode}`));
-            }
-          });
-        }
-      );
-      req.on("error", reject);
-      req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
-      req.end();
-    });
-
-    if (data?.data && Array.isArray(data.data)) {
-      modelsList = data.data.map((m) => ({
-        id: m.id,
-        object: "model",
-        created: m.created || 1626777600,
-        owned_by: m.owned_by || "agentrouter",
-      }));
-      modelSource = "dynamic";
-      log(ts, `DISCOVERED ${modelsList.length} models from upstream`);
-    }
-  } catch (e) {
-    log(ts, `Model discovery failed: ${e.message}, using static list`);
-    modelSource = "static";
-    modelsList = [...STATIC_MODELS];
-  }
-}
-
-// ── DNS resolution ──
+// ── DNS ──
 
 async function resolveDns() {
   const ts = new Date().toISOString();
   try {
-    const addresses = await resolve4(TARGET_HOST);
-    log(ts, `DNS resolved ${TARGET_HOST} → ${addresses.join(", ")}`);
+    const addresses = await resolve4(cfg.TARGET_HOST_VAL);
+    log(ts, `DNS resolved ${cfg.TARGET_HOST_VAL} → ${addresses.join(", ")}`);
   } catch {
-    log(ts, `DNS resolution failed for ${TARGET_HOST}`);
+    log(ts, `DNS resolution failed for ${cfg.TARGET_HOST_VAL}`);
   }
 }
 
-// ── WAF Cookie Store ──
-
-let wafCookieStr = "";
-
-function extractWafCookies(res) {
-  const cookies = res.headers["set-cookie"] || [];
-  const waf = [];
-  for (const c of cookies) {
-    const name = c.split("=")[0];
-    if (name === "acw_tc" || name === "acw_sc__v2" || name === "cdn_sec_tc") {
-      waf.push(c.split(";")[0]);
-    }
-  }
-  return waf;
-}
-
-async function warmup() {
-  const ts = new Date().toISOString();
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const cookie = await new Promise((resolve, reject) => {
-        const req = UPSTREAM_MODULE.request(
-          {
-            hostname: TARGET_HOST,
-            port: TARGET_PORT_INT,
-            path: "/",
-            method: "GET",
-            headers: WARMUP_HEADERS,
-            agent: false,
-            rejectUnauthorized: true,
-            timeout: 10000,
-          },
-          (res) => {
-            const waf = extractWafCookies(res);
-            res.resume();
-            res.on("end", () => resolve(waf));
-          }
-        );
-        req.on("error", reject);
-        req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
-        req.end();
-      });
-
-      if (cookie.length) {
-        wafCookieStr = cookie.join("; ");
-        log(ts, `WARMUP → 200 cookies: ${cookie.length}`);
-        return;
-      }
-    } catch {}
-    if (attempt < 2) await sleep(1000 * (attempt + 1));
-  }
-  log(ts, `WARMUP failed after 3 attempts`);
-}
+// ── Warmup scheduler ──
 
 function scheduleWarmup() {
   warmup();
-  setInterval(warmup, WARMUP_INTERVAL);
+  setInterval(warmup, cfg.WARMUP_INTERVAL);
 }
 
-// ── Circuit breaker ──
+// ── Model discovery scheduler ──
 
-let consecutiveFails = 0;
-let circuitOpenUntil = 0;
-
-function isCircuitOpen() {
-  if (Date.now() > circuitOpenUntil) return false;
-  return true;
-}
-
-function recordSuccess() {
-  consecutiveFails = 0;
-}
-
-function recordFailure() {
-  consecutiveFails++;
-  if (consecutiveFails >= 5) {
-    circuitOpenUntil = Date.now() + Math.min(60000 * Math.pow(2, consecutiveFails - 5), 600000);
-    log(new Date().toISOString(), `CIRCUIT OPEN for ${(circuitOpenUntil - Date.now()) / 1000}s (${consecutiveFails} consecutive failures)`);
+function scheduleDiscovery() {
+  if (!cfg.AR_API_KEY_VAL) {
+    console.log(`Model discovery disabled (no AR_API_KEY set), using static list`);
+    return;
   }
+  fetchModels();
+  setInterval(fetchModels, cfg.DISCOVERY_INTERVAL);
 }
-
-function log(ts, msg) {
-  console.log(`[${ts}] ${msg}`);
-}
-function logDebug(ts, msg) {
-  if (IS_DEBUG) console.log(`[${ts}] [DEBUG] ${msg}`);
-}
-
-function truncate(str, max = 500) {
-  if (!str || str.length <= max) return str;
-  return str.slice(0, max) + `... (${str.length - max} more bytes)`;
-}
-
-function filterHeaders(headers) {
-  if (!headers) return {};
-  const out = {};
-  for (const [k, v] of Object.entries(headers)) {
-    if (!HOP_BY_HOP.has(k.toLowerCase())) out[k] = v;
-  }
-  return out;
-}
-
-function injectPrompt(rawBody, path) {
-  if (!INJECT_SYSTEM_PROMPT || !rawBody.length) return rawBody;
-  try {
-    const body = JSON.parse(rawBody.toString("utf8"));
-    if (!body) return rawBody;
-
-    if (path.startsWith("/v1/messages")) {
-      if (typeof body.system === "string") {
-        body.system = INJECT_SYSTEM_PROMPT + "\n\n" + body.system;
-      } else if (Array.isArray(body.system)) {
-        body.system.unshift({ type: "text", text: INJECT_SYSTEM_PROMPT });
-      } else {
-        body.system = [{ type: "text", text: INJECT_SYSTEM_PROMPT }];
-      }
-    }
-
-    if (path.startsWith("/v1/chat/completions") && Array.isArray(body.messages)) {
-      body.messages.unshift({ role: "system", content: INJECT_SYSTEM_PROMPT });
-    }
-
-    return Buffer.from(JSON.stringify(body), "utf8");
-  } catch {
-    return rawBody;
-  }
-}
-
-function rewritePath(path) {
-  if (path === "/messages" || path.startsWith("/messages?"))
-    return path.replace("/messages", "/v1/messages");
-  if (path === "/v1/messages" || path.startsWith("/v1/messages?")) return path;
-  if (path === "/v1/chat/completions" || path.startsWith("/v1/chat/completions?")) return path;
-  return path;
-}
-
-function respondJson(res, status, data) {
-  res.writeHead(status, {
-    "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
-  });
-  res.end(JSON.stringify(data));
-}
-
-function isWafBlock(statusCode, body) {
-  if (statusCode !== 405 && statusCode !== 403) return false;
-  const html = typeof body === "string" ? body : body.toString("utf8");
-  return html.includes("alicdn") || html.includes("block_message") || html.includes("renderData");
-}
-
-function isRetryable(statusCode, errorMessage) {
-  if (statusCode >= 500 && statusCode <= 599) return true;
-  if (!statusCode) return true;
-  if (errorMessage && (errorMessage.includes("socket hang up") || errorMessage.includes("timeout") || errorMessage.includes("ECONNRESET") || errorMessage.includes("ETIMEDOUT") || errorMessage.includes("ENETUNREACH"))) return true;
-  return false;
-}
-
-// ── SSE idle timeout (default 10 min no data = hung stream) ──
 
 // ── Server ──
 
@@ -329,30 +73,33 @@ const server = http.createServer((req, res) => {
   const rawPath = req.url;
   const method = req.method;
 
-  // ── Health check ──
+  // Health check
   if (method === "GET" && (rawPath === "/health" || rawPath === "/api/health")) {
     respondJson(res, 200, {
       ok: true,
-      upstream: `${TARGET_HOST}:${TARGET_PORT}`,
-      modelSource,
-      staticModels: STATIC_MODELS.length,
-      availableModels: modelsList.length,
+      upstream: `${cfg.TARGET_HOST_VAL}:${cfg.TARGET_PORT_INT}`,
+      modelSource: getModelSource(),
+      staticModels: cfg.MODELS_CSV_VAL.split(",").length,
+      availableModels: getModelsList().length,
       activeStreams,
-      wafCookie: !!wafCookieStr,
+      wafCookie: !!getWafCookie(),
       circuitOpen: isCircuitOpen(),
-      consecutiveFails,
+      consecutiveFails: getConsecutiveFails(),
     });
     return;
   }
 
-  // ── Model list ──
+  // Model list
   if (method === "GET" && (rawPath === "/v1/models" || rawPath === "/models")) {
-    respondJson(res, 200, { data: modelsList, object: "list" });
+    respondJson(res, 200, { data: getModelsList(), object: "list" });
     return;
   }
 
-  // ── Proxy ──
+  // ── Proxy request ──
+
   const body = [];
+  let bodySize = 0;
+  let bodyRejected = false;
   let currentUpstreamReq = null;
   let proxyDone = false;
   let hasEnded = false;
@@ -363,7 +110,6 @@ const server = http.createServer((req, res) => {
     activeStreams--;
   }
 
-  // Safe response helpers — guard against ERR_HTTP_HEADERS_SENT
   function safeWriteHead(statusCode, headers) {
     if (res.headersSent) return false;
     try { res.writeHead(statusCode, headers); return true; }
@@ -385,7 +131,17 @@ const server = http.createServer((req, res) => {
     try { respondJson(res, status, data); } catch (e) { log(ts, `safeRespondJson error: ${e.message}`); }
   }
 
-  req.on("data", (c) => body.push(c));
+  req.on("data", (c) => {
+    bodySize += c.length;
+    if (bodySize > MAX_BODY_SIZE && !bodyRejected) {
+      bodyRejected = true;
+      req.destroy();
+      respondJson(res, 413, { error: { code: "payload_too_large", message: "Request body exceeds 20MB limit", type: "proxy_error" } });
+      return;
+    }
+    if (!bodyRejected) body.push(c);
+  });
+
   req.on("end", () => {
     hasEnded = true;
     const path = rewritePath(rawPath);
@@ -399,13 +155,12 @@ const server = http.createServer((req, res) => {
       ...(req.headers["anthropic-version"] ? { "anthropic-version": req.headers["anthropic-version"] } : {}),
     };
 
-    if (wafCookieStr) upstreamHeaders["Cookie"] = wafCookieStr;
+    const wafCookie = getWafCookie();
+    if (wafCookie) upstreamHeaders["Cookie"] = wafCookie;
 
     if (isCircuitOpen()) {
       log(ts, `${method} ${rawPath} -> REJECTED (circuit open)`);
-      safeRespondJson(503, {
-        error: { code: "circuit_open", message: "Upstream circuit breaker open, retry later", type: "proxy_error" },
-      });
+      safeRespondJson(503, { error: { code: "circuit_open", message: "Upstream circuit breaker open, retry later", type: "proxy_error" } });
       return;
     }
 
@@ -415,26 +170,25 @@ const server = http.createServer((req, res) => {
       log(ts, `${method} ${rawPath} -> ${path} (attempt ${attempt + 1})`);
 
       return new Promise((resolveProxy) => {
-        // Guard: if proxy already finished (client disconnected, previous attempt resolved), skip
         if (proxyDone) { resolveProxy(); return; }
 
         const opts = {
-          hostname: TARGET_HOST,
-          port: TARGET_PORT_INT,
+          hostname: cfg.TARGET_HOST_VAL,
+          port: cfg.TARGET_PORT_INT,
           path,
           method,
           headers: upstreamHeaders,
-          agent: AGENT,
+          agent: cfg.AGENT,
           rejectUnauthorized: true,
-          timeout: TIMEOUT,
+          timeout: cfg.TIMEOUT,
         };
 
-        let errorHandled = false;  // prevent double-invocation of handleError (timeout fires error)
-        let idleTimer = null;      // SSE idle timeout
-        let reqTimer = null;       // upstream request timeout (manual, more reliable than opts.timeout)
-        let responseTimer = null;  // upstream response timeout (first byte)
-        let chunkTimer = null;     // per-chunk stall timeout (SSE)
-        let keepaliveTimer = null; // client keepalive ping injector
+        let errorHandled = false;
+        let idleTimer = null;
+        let reqTimer = null;
+        let responseTimer = null;
+        let chunkTimer = null;
+        let keepaliveTimer = null;
         let isSse = false;
         let sawMessageStop = false;
         let upstreamResponded = false;
@@ -447,12 +201,12 @@ const server = http.createServer((req, res) => {
           if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
         }
 
-        const upstreamReq = UPSTREAM_MODULE.request(opts, (upstreamRes) => {
+        const upstreamReq = cfg.UPSTREAM_MODULE.request(opts, (upstreamRes) => {
           upstreamResponded = true;
-          clearIdleTimer(); // clear response timeout — upstream responded
+          clearIdleTimer();
           const statusCode = upstreamRes.statusCode;
 
-          // Handle WAF block: re-warmup and retry once
+          // WAF block → re-warmup & retry once
           if ((statusCode === 405 || statusCode === 403) && attempt === 0) {
             let chunks = [];
             upstreamRes.on("data", (c) => chunks.push(c));
@@ -461,8 +215,8 @@ const server = http.createServer((req, res) => {
               if (isWafBlock(statusCode, raw)) {
                 log(ts, `WAF ${statusCode} detected, refreshing cookie and retrying...`);
                 await warmup();
-                if (wafCookieStr) upstreamHeaders["Cookie"] = wafCookieStr;
-                finishProxy(); // decrement activeStreams before retry
+                const newCookie = getWafCookie();
+                if (newCookie) upstreamHeaders["Cookie"] = newCookie;
                 const result = await doRequest(attempt + 1);
                 resolveProxy(result);
                 return;
@@ -478,13 +232,12 @@ const server = http.createServer((req, res) => {
             return;
           }
 
-          // Retry on 5xx
-          if (isRetryable(statusCode, null) && attempt < MAX_RETRIES_NUM) {
+          // 5xx retry
+          if (isRetryable(statusCode, null) && attempt < cfg.MAX_RETRIES_NUM) {
             upstreamRes.resume();
-            errorHandled = true; // prevent concurrent timeout/error retry
-            log(ts, `${method} ${rawPath} <- ${statusCode}, retrying (${attempt + 1}/${MAX_RETRIES_NUM})...`);
-            const delay = RETRY_DELAY * Math.pow(2, attempt);
-            finishProxy(); // decrement activeStreams before retry
+            errorHandled = true;
+            log(ts, `${method} ${rawPath} <- ${statusCode}, retrying (${attempt + 1}/${cfg.MAX_RETRIES_NUM})...`);
+            const delay = cfg.RETRY_DELAY * Math.pow(2, attempt);
             setTimeout(async () => {
               const result = await doRequest(attempt + 1);
               resolveProxy(result);
@@ -526,8 +279,7 @@ const server = http.createServer((req, res) => {
             return;
           }
 
-          // 200 response — send headers immediately, detect empty SSE streams
-          const KEEPALIVE_THRESHOLD = 50;
+          // 200 streaming response
           const reqStart = Date.now();
           let streamFinished = false;
           let chunkCount = 0;
@@ -551,12 +303,10 @@ const server = http.createServer((req, res) => {
           logDebug(ts, `${method} ${rawPath} <- TTFB ${Date.now() - reqStart}ms, status 200, SSE=${isSse}`);
 
           function resetChunkTimer() {
-            if (chunkTimer && sawDataEvent) {
-              clearTimeout(chunkTimer); chunkTimer = null;
-            }
+            if (chunkTimer && sawDataEvent) { clearTimeout(chunkTimer); chunkTimer = null; }
             if (!sawDataEvent && chunkTimer) return;
             if (isSse && !streamFinished) {
-              const timeout = sawDataEvent ? SSE_CHUNK_TIMEOUT : Math.min(60000, SSE_CHUNK_TIMEOUT);
+              const timeout = sawDataEvent ? cfg.SSE_CHUNK_TIMEOUT : Math.min(60000, cfg.SSE_CHUNK_TIMEOUT);
               chunkTimer = setTimeout(() => {
                 if (streamFinished) return;
                 if (!sawDataEvent) {
@@ -564,9 +314,7 @@ const server = http.createServer((req, res) => {
                 } else {
                   log(ts, `${method} ${rawPath} <- SSE CHUNK TIMEOUT (${timeout / 1000}s no data)`);
                 }
-                if (!sawMessageStop) {
-                  safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`);
-                }
+                if (!sawMessageStop) { safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`); }
                 safeEnd();
                 if (!upstreamReq.destroyed) upstreamReq.destroy();
                 finishStream();
@@ -580,9 +328,7 @@ const server = http.createServer((req, res) => {
             keepaliveTimer = setInterval(() => {
               if (streamFinished || res.writableEnded) { clearInterval(keepaliveTimer); keepaliveTimer = null; return; }
               const canContinue = res.write(":\n\n");
-              if (canContinue === false && IS_DEBUG) {
-                logDebug(ts, "keepalive backpressure, skipping tick");
-              }
+              if (canContinue === false && cfg.IS_DEBUG) { logDebug(ts, "keepalive backpressure, skipping tick"); }
             }, 10000);
             keepaliveTimer.unref();
           }
@@ -592,14 +338,12 @@ const server = http.createServer((req, res) => {
             if (isSse && !streamFinished) {
               idleTimer = setTimeout(() => {
                 if (streamFinished) return;
-                log(ts, `${method} ${rawPath} <- SSE IDLE TIMEOUT (${SSE_IDLE / 1000}s no data)`);
-                if (!sawMessageStop) {
-                  safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`);
-                }
+                log(ts, `${method} ${rawPath} <- SSE IDLE TIMEOUT (${cfg.SSE_IDLE / 1000}s no data)`);
+                if (!sawMessageStop) { safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`); }
                 safeEnd();
                 if (!upstreamReq.destroyed) upstreamReq.destroy();
                 finishStream();
-              }, SSE_IDLE);
+              }, cfg.SSE_IDLE);
               idleTimer.unref();
             }
           }
@@ -643,9 +387,7 @@ const server = http.createServer((req, res) => {
             if (streamFinished) return;
             const causeCode = e.cause?.code ? ` (cause: ${e.cause.code})` : "";
             log(ts, `${method} ${rawPath} <- UPSTREAM STREAM ERROR: ${e.message}${causeCode}`);
-            if (isSse && !sawMessageStop) {
-              safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`);
-            }
+            if (isSse && !sawMessageStop) { safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`); }
             safeEnd();
             finishStream();
           });
@@ -654,26 +396,23 @@ const server = http.createServer((req, res) => {
             if (streamFinished) return;
             if (!res.writableEnded) {
               log(ts, `${method} ${rawPath} <- UPSTREAM CLOSED (connection terminated prematurely, ${Date.now() - reqStart}ms, ${chunkCount} chunks)`);
-              if (isSse && !sawMessageStop) {
-                safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`);
-              }
+              if (isSse && !sawMessageStop) { safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`); }
               safeEnd();
             }
             finishStream();
           });
         });
 
-        // Track current upstream request for client-disconnect handler
         currentUpstreamReq = upstreamReq;
 
-        // Response timeout: fire if upstream doesn't send headers within RESPONSE_TIMEOUT
+        // Response timeout
         responseTimer = setTimeout(() => {
           if (upstreamResponded) return;
           if (errorHandled) return;
           errorHandled = true;
           clearIdleTimer();
           if (!upstreamReq.destroyed) upstreamReq.destroy(new Error('upstream response timeout'));
-        }, RESPONSE_TIMEOUT);
+        }, cfg.RESPONSE_TIMEOUT);
         responseTimer.unref();
 
         upstreamReq.on("timeout", () => {
@@ -697,18 +436,16 @@ const server = http.createServer((req, res) => {
           if (res.headersSent) {
             recordFailure();
             log(ts, `${method} ${rawPath} -> STREAM ERROR after partial response: ${e.message}`);
-            if (isSse && !sawMessageStop) {
-              try { res.write(`\n${SSE_EOM}\ndata: {}\n\n`); } catch {}
-            }
+            if (isSse && !sawMessageStop) { try { res.write(`\n${SSE_EOM}\ndata: {}\n\n`); } catch {} }
             try { res.end(); } catch {}
             finishProxy();
             resolveProxy();
             return;
           }
 
-          if (attempt < MAX_RETRIES_NUM && isRetryable(null, e.message)) {
-            log(ts, `${method} ${rawPath} -> ERROR: ${e.message}, retrying (${attempt + 1}/${MAX_RETRIES_NUM})...`);
-            const delay = RETRY_DELAY * Math.pow(2, attempt);
+          if (attempt < cfg.MAX_RETRIES_NUM && isRetryable(null, e.message)) {
+            log(ts, `${method} ${rawPath} -> ERROR: ${e.message}, retrying (${attempt + 1}/${cfg.MAX_RETRIES_NUM})...`);
+            const delay = cfg.RETRY_DELAY * Math.pow(2, attempt);
             await sleep(delay);
             if (proxyDone) { resolveProxy(); return; }
             const result = await doRequest(attempt + 1);
@@ -718,30 +455,27 @@ const server = http.createServer((req, res) => {
 
           recordFailure();
           log(ts, `${method} ${rawPath} -> ERROR: ${e.message} (final)`);
-          if (e.message === "timeout") {
-            safeRespondJson(504, {
-              error: { code: "timeout", message: "Upstream request timed out", type: "proxy_error" },
-            });
+          if (e.message === "timeout" || e.message === "upstream response timeout") {
+            safeRespondJson(504, { error: { code: "timeout", message: "Upstream request timed out", type: "proxy_error" } });
           } else {
-            safeRespondJson(502, {
-              error: { code: "proxy_error", message: e.message, type: "proxy_error" },
-            });
+            safeRespondJson(502, { error: { code: "proxy_error", message: e.message, type: "proxy_error" } });
           }
           finishProxy();
           resolveProxy();
         }
 
-        // Manual request timeout (more reliable than opts.timeout with keep-alive pool)
+        // Manual request timeout
         reqTimer = setTimeout(() => {
           if (errorHandled) return;
           errorHandled = true;
           clearIdleTimer();
           upstreamReq.destroy();
           handleError(new Error("timeout"));
-        }, TIMEOUT);
+        }, cfg.TIMEOUT);
         reqTimer.unref();
 
-        const rawBody = injectPrompt(Buffer.concat(body), path);
+        const fullBody = Buffer.concat(body);
+        const rawBody = injectPrompt(fullBody, path, cfg.INJECT_SYSTEM_PROMPT_VAL);
         if (rawBody.length) upstreamReq.write(rawBody);
         upstreamReq.end();
       });
@@ -749,17 +483,15 @@ const server = http.createServer((req, res) => {
 
     doRequest(0).catch((e) => {
       log(ts, `${method} ${rawPath} -> UNHANDLED PROXY ERROR: ${e.message}`);
-      safeRespondJson(500, {
-        error: { code: "internal_error", message: "Proxy internal error", type: "proxy_error" },
-      });
+      safeRespondJson(500, { error: { code: "internal_error", message: "Proxy internal error", type: "proxy_error" } });
       finishProxy();
     });
   });
 
   req.on("close", () => {
     if (proxyDone) return;
-    const trulyDisconnected = !hasEnded || req.socket?.destroyed;
-    if (trulyDisconnected && currentUpstreamReq && !currentUpstreamReq.destroyed) {
+    const shouldAbort = !hasEnded || req.socket?.destroyed;
+    if (shouldAbort && currentUpstreamReq && !currentUpstreamReq.destroyed) {
       currentUpstreamReq.destroy();
     }
   });
@@ -771,23 +503,13 @@ const server = http.createServer((req, res) => {
   });
 });
 
-// Safety: guard against slow-headers attacks
-server.headersTimeout = 30000;   // 30s to send complete request headers
-server.requestTimeout = 0;       // no limit on req body (SSE can be long)
+server.headersTimeout = 30000;
+server.requestTimeout = 0;
 
-// ── Start & Graceful Shutdown ──
+// ── Start & Shutdown ──
 
-function scheduleDiscovery() {
-  if (!AR_API_KEY) {
-    console.log(`Model discovery disabled (no AR_API_KEY set), using static list (${STATIC_MODELS.length} models)`);
-    return;
-  }
-  fetchModels();
-  setInterval(fetchModels, DISCOVERY_INTERVAL);
-}
-
-server.listen(PORT, "0.0.0.0", async () => {
-  console.log(`AgentRouter proxy listening on port ${PORT}, target=${TARGET_HOST}:${TARGET_PORT}`);
+server.listen(cfg.PORT, "0.0.0.0", async () => {
+  console.log(`AgentRouter proxy listening on port ${cfg.PORT}, target=${cfg.TARGET_HOST_VAL}:${cfg.TARGET_PORT_INT}`);
   await resolveDns();
   scheduleWarmup();
   scheduleDiscovery();
@@ -796,10 +518,12 @@ server.listen(PORT, "0.0.0.0", async () => {
 function shutdown(signal) {
   console.log(`\n[${new Date().toISOString()}] ${signal} received — draining ${activeStreams} active streams...`);
   server.close(() => {
+    cfg.AGENT.destroy();
     console.log(`[${new Date().toISOString()}] Server closed, exiting.`);
     process.exit(0);
   });
   setTimeout(() => {
+    cfg.AGENT.destroy();
     console.error(`[${new Date().toISOString()}] Forced exit after timeout`);
     process.exit(1);
   }, 15000).unref();
@@ -807,20 +531,13 @@ function shutdown(signal) {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
-
-// Prevent uncaught exceptions (e.g. ERR_HTTP_HEADERS_SENT race) from crashing
 process.on("uncaughtException", (err, origin) => {
   console.error(`[${new Date().toISOString()}] UNCAUGHT EXCEPTION (${origin}): ${err.message}`);
   console.error(err.stack);
-  // Don't exit — let Docker health check restart if truly broken
 });
-
-// Catch promise rejections that slip through — log clearly instead of silent warning
-process.on("unhandledRejection", (reason, promise) => {
+process.on("unhandledRejection", (reason) => {
   const ts = new Date().toISOString();
   const msg = reason instanceof Error ? reason.message : String(reason);
   console.error(`[${ts}] UNHANDLED REJECTION: ${msg}`);
-  if (reason instanceof Error && reason.stack) {
-    console.error(reason.stack);
-  }
+  if (reason instanceof Error && reason.stack) console.error(reason.stack);
 });

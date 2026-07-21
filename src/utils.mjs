@@ -1,0 +1,77 @@
+export const HOP_BY_HOP = new Set([
+  "transfer-encoding", "connection", "keep-alive",
+  "proxy-authenticate", "proxy-authorization",
+  "te", "trailer", "upgrade",
+]);
+
+export const SSE_EOM = "event: message_stop";
+export const KEEPALIVE_THRESHOLD = 50;
+export const MAX_BODY_SIZE = 20 * 1024 * 1024;
+
+// ── Pure functions ──
+
+export function truncate(str, max = 500) {
+  if (!str || str.length <= max) return str;
+  return str.slice(0, max) + `... (${str.length - max} more bytes)`;
+}
+
+export function filterHeaders(headers) {
+  if (!headers) return {};
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (!HOP_BY_HOP.has(k.toLowerCase())) out[k] = v;
+  }
+  return out;
+}
+
+export function rewritePath(path) {
+  if (path === "/messages" || path.startsWith("/messages?"))
+    return path.replace("/messages", "/v1/messages");
+  if (path === "/v1/messages" || path.startsWith("/v1/messages?")) return path;
+  if (path === "/v1/chat/completions" || path.startsWith("/v1/chat/completions?")) return path;
+  return path;
+}
+
+export function respondJson(res, status, data) {
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*",
+  });
+  res.end(JSON.stringify(data));
+}
+
+export function isWafBlock(statusCode, body) {
+  if (statusCode !== 405 && statusCode !== 403) return false;
+  const html = typeof body === "string" ? body : body.toString("utf8");
+  return html.includes("alicdn") || html.includes("block_message") || html.includes("renderData");
+}
+
+export function isRetryable(statusCode, errorMessage) {
+  if (statusCode >= 500 && statusCode <= 599) return true;
+  if (!statusCode) return true;
+  if (errorMessage && (errorMessage.includes("socket hang up") || errorMessage.includes("timeout") || errorMessage.includes("ECONNRESET") || errorMessage.includes("ETIMEDOUT") || errorMessage.includes("ENETUNREACH"))) return true;
+  return false;
+}
+
+export function injectPrompt(rawBody, path, prompt) {
+  if (!prompt || !rawBody.length) return rawBody;
+  try {
+    const body = JSON.parse(rawBody.toString("utf8"));
+    if (!body) return rawBody;
+    if (path.startsWith("/v1/messages")) {
+      if (typeof body.system === "string") {
+        body.system = prompt + "\n\n" + body.system;
+      } else if (Array.isArray(body.system)) {
+        body.system.unshift({ type: "text", text: prompt });
+      } else {
+        body.system = [{ type: "text", text: prompt }];
+      }
+    }
+    if (path.startsWith("/v1/chat/completions") && Array.isArray(body.messages)) {
+      body.messages.unshift({ role: "system", content: prompt });
+    }
+    return Buffer.from(JSON.stringify(body), "utf8");
+  } catch {
+    return rawBody;
+  }
+}
