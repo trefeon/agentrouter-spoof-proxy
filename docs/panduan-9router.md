@@ -123,26 +123,27 @@ Cari jaringan 9Router (biasanya `9router-net` atau `9router_default`).
 docker network connect 9router-net agentrouter-proxy
 ```
 
-### Atau gunakan `docker-compose.override.yml`:
+### Atau gunakan `docker-compose.override.yml` (otomatis tergabung dengan `docker-compose.yml`):
 
 ```bash
 cp docker-compose.override.yml.example docker-compose.override.yml
 ```
 
-Edit `docker-compose.override.yml`:
+Edit `docker-compose.override.yml` dan sesuaikan nama jaringan 9Router kamu:
 
 ```yaml
 services:
   agentrouter-proxy:
     networks:
-      9router-net:
-        ipv4_address: 172.18.0.3   # IP statis (opsional)
+      - proxy-net            # nama bebas, terserah kamu
 
 networks:
-  9router-net:
+  proxy-net:
     external: true
-    name: 9router-net   # ganti dengan nama jaringan 9Router kamu
+    name: 9router-net        # ganti dengan nama jaringan 9Router kamu
 ```
+
+> Cek nama jaringan 9Router dengan `docker network ls`.
 
 Lalu restart:
 
