@@ -239,7 +239,7 @@ Model yang akan muncul:
 - `claude-opus-4-7`
 - `claude-opus-4-8`
 - `glm-5.2`
-- `gpt-5.5` (kadang muncul, kuota terbatas — bisa 403)
+- `gpt-5.5`
 
 Jika mengaktifkan **Model Auto-Discovery** (dengan `AR_API_KEY`), model yang tampil akan sesuai dengan akun agentrouter.org kamu.
 
@@ -337,13 +337,13 @@ Masukkan API key 9Router (bukan API key agentrouter).
 
 ## Model yang Tersedia
 
-| Model ID (di 9Router) | Deskripsi | Context | Output |
-|-----------------------|-----------|---------|--------|
-| `AG-claude-opus-4-6` | Claude Opus 4.6 | 1M | 128k |
-| `AG-claude-opus-4-7` | Claude Opus 4.7 | 1M | 128k |
-| `AG-claude-opus-4-8` | Claude Opus 4.8 (irit token ~35%) | 1M | 128k |
-| `AG-glm-5.2` | GLM 5.2 (lebih murah) | 1M | 131k |
-| `AG-gpt-5.5` | Kadang muncul, kuota terbatas — bisa 403 | — | — |
+| Model ID (di 9Router) | Provider | Context | Output | Harga Input/Output per MTok |
+|-----------------------|----------|---------|--------|----------------------------|
+| `AG-claude-opus-4-8` | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) | 1M | 128K | $5 / $25 |
+| `AG-claude-opus-4-7` | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) | 1M | 128K | $5 / $25 |
+| `AG-claude-opus-4-6` | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) | 1M | 128K | $5 / $25 |
+| `AG-gpt-5.5` | [OpenAI](https://developers.openai.com/docs/models/gpt-5.5) | 1.05M | 128K | $5 / $30 |
+| `AG-glm-5.2` | [ZhipuAI](https://docs.bigmodel.cn/cn/guide/start/model-overview) | 1M | 128K | ~$0.84 / ~$2.63 |
 
 ---
 
