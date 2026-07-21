@@ -1,4 +1,4 @@
-import { log } from "./logger.mjs";
+import { log } from "../logger.mjs";
 
 let consecutiveFails = 0;
 let circuitOpenUntil = 0;

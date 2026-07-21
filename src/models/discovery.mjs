@@ -1,5 +1,5 @@
-import { UPSTREAM_MODULE, TARGET_HOST_VAL, TARGET_PORT_INT, AGENT, MODELS_CSV_VAL, AR_API_KEY_VAL } from "./config.mjs";
-import { log } from "./logger.mjs";
+import { UPSTREAM_MODULE, TARGET_HOST_VAL, TARGET_PORT_INT, AGENT, MODELS_CSV_VAL, AR_API_KEY_VAL } from "../config.mjs";
+import { log } from "../logger.mjs";
 
 const STATIC_MODELS = MODELS_CSV_VAL.split(",").map((id) => ({
   id: id.trim(),

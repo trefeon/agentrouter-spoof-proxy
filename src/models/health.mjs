@@ -1,5 +1,5 @@
-import { UPSTREAM_MODULE, TARGET_HOST_VAL, TARGET_PORT_INT, AGENT } from "./config.mjs";
-import { log } from "./logger.mjs";
+import { UPSTREAM_MODULE, TARGET_HOST_VAL, TARGET_PORT_INT, AGENT } from "../config.mjs";
+import { log } from "../logger.mjs";
 
 const PROBE_INTERVAL = 60000;     // recovery probe every 60s
 const PROBE_TIMEOUT = 8000;       // probe deadline

@@ -1,5 +1,5 @@
-import { UPSTREAM_MODULE, TARGET_HOST_VAL, TARGET_PORT_INT } from "./config.mjs";
-import { log } from "./logger.mjs";
+import { UPSTREAM_MODULE, TARGET_HOST_VAL, TARGET_PORT_INT } from "../config.mjs";
+import { log } from "../logger.mjs";
 
 const WARMUP_HEADERS = {
   "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -20,8 +20,9 @@ export function getWafCookie() {
   return wafCookieStr;
 }
 
-function extractWafCookies(res) {
-  const cookies = res.headers["set-cookie"] || [];
+export function extractWafCookies(res) {
+  const raw = res.headers["set-cookie"] || [];
+  const cookies = Array.isArray(raw) ? raw : [raw];
   const waf = [];
   for (const c of cookies) {
     const name = c.split("=")[0];

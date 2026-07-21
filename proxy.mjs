@@ -3,36 +3,17 @@ import { resolve4 } from "node:dns/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import * as cfg from "./src/config.mjs";
 import { log, logDebug } from "./src/logger.mjs";
-import { isCircuitOpen, recordSuccess, recordFailure, getConsecutiveFails } from "./src/circuit-breaker.mjs";
-import { getWafCookie, warmup } from "./src/waf.mjs";
-import { getModelsList, getModelSource, fetchModels } from "./src/models.mjs";
-import { getHealthyModels, startProbeLoop, stopProbeLoop, markModelFailed, markModelExhausted, markModelDegraded } from "./src/model-health.mjs";
-import { recordModelStart, recordModelResult, getModelStats } from "./src/model-stats.mjs";
+import { isCircuitOpen, recordSuccess, recordFailure, getConsecutiveFails } from "./src/resilience/circuit-breaker.mjs";
+import { getWafCookie, warmup } from "./src/auth/waf.mjs";
+import { SPOOF_HEADERS } from "./src/auth/spoof.mjs";
+import { getModelsList, getModelSource, fetchModels } from "./src/models/discovery.mjs";
+import { getHealthyModels, startProbeLoop, stopProbeLoop, markModelFailed, markModelExhausted, markModelDegraded } from "./src/models/health.mjs";
+import { recordModelStart, recordModelResult, getModelStats } from "./src/models/stats.mjs";
 import {
   SSE_EOM, KEEPALIVE_THRESHOLD, MAX_BODY_SIZE,
   truncate, filterHeaders, rewritePath, respondJson,
   isWafBlock, isRetryable, injectPrompt, summarizeRequest, responseHasEmptyOutput, redactSensitive,
 } from "./src/utils.mjs";
-
-// ── Spoof headers ──
-
-const SPOOF_HEADERS = {
-  "User-Agent": "claude-cli/2.1.92 (external, sdk-cli)",
-  "Anthropic-Version": "2023-06-01",
-  "Anthropic-Beta":
-    "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24,structured-outputs-2025-12-15,fast-mode-2026-02-01,token-efficient-tools-2026-03-28",
-  "Anthropic-Dangerous-Direct-Browser-Access": "true",
-  "X-App": "cli",
-  "X-Stainless-Helper-Method": "stream",
-  "X-Stainless-Retry-Count": "0",
-  "X-Stainless-Runtime-Version": "v24.14.0",
-  "X-Stainless-Package-Version": "0.80.0",
-  "X-Stainless-Runtime": "node",
-  "X-Stainless-Lang": "js",
-  "X-Stainless-Arch": "arm64",
-  "X-Stainless-Os": "Linux",
-  "X-Stainless-Timeout": "600",
-};
 
 // ── Shared state ──
 
@@ -280,9 +261,21 @@ const server = http.createServer((req, res) => {
 
           const filteredHeaders = filterHeaders(upstreamRes.headers);
           isSse = (upstreamRes.headers["content-type"] || "").includes("text/event-stream");
+          if (filteredHeaders["set-cookie"]) {
+            const v = filteredHeaders["set-cookie"];
+            filteredHeaders["set-cookie"] = Array.isArray(v) ? v : [v];
+          }
           if (isSse) {
             filteredHeaders["X-Accel-Buffering"] = "no";
             filteredHeaders["Cache-Control"] = "no-cache";
+            filteredHeaders["Connection"] = "keep-alive";
+            filteredHeaders["Pragma"] = "no-cache";
+            filteredHeaders["Expire"] = "0";
+            if (req.socket && !req.socket.destroyed) {
+              req.socket.setKeepAlive(true);
+              req.socket.setNoDelay(true);
+              req.socket.setTimeout(0);
+            }
           }
 
           if (statusCode !== 200) {
@@ -546,6 +539,12 @@ const server = http.createServer((req, res) => {
   req.on("error", () => {
     if (proxyDone) return;
     if (currentUpstreamReq && !currentUpstreamReq.destroyed) {
+      currentUpstreamReq.destroy();
+    }
+  });
+  res.on("close", () => {
+    if (proxyDone) return;
+    if (!res.writableFinished && currentUpstreamReq && !currentUpstreamReq.destroyed) {
       currentUpstreamReq.destroy();
     }
   });

@@ -56,6 +56,13 @@ export function filterHeaders(headers) {
   return out;
 }
 
+export function normalizeSetCookie(headers) {
+  if (!headers || !headers["set-cookie"]) return headers;
+  const v = headers["set-cookie"];
+  headers["set-cookie"] = Array.isArray(v) ? v : [v];
+  return headers;
+}
+
 export function rewritePath(path) {
   if (path === "/messages" || path.startsWith("/messages?"))
     return path.replace("/messages", "/v1/messages");

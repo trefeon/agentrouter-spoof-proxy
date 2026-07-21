@@ -1,4 +1,4 @@
-import { SLOW_RESPONSE_MS_INT } from "./config.mjs";
+import { SLOW_RESPONSE_MS_INT } from "../config.mjs";
 
 const stats = new Map();
 

@@ -1,113 +1,12 @@
-import { describe, it, before, after } from "node:test";
+import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-
-const HOP_BY_HOP = new Set([
-  "transfer-encoding", "connection", "keep-alive",
-  "proxy-authenticate", "proxy-authorization",
-  "te", "trailer", "upgrade",
-]);
-
-function filterHeaders(headers) {
-  if (!headers) return {};
-  const out = {};
-  for (const [k, v] of Object.entries(headers)) {
-    if (!HOP_BY_HOP.has(k.toLowerCase())) out[k] = v;
-  }
-  return out;
-}
-
-function rewritePath(path) {
-  if (path === "/messages" || path.startsWith("/messages?"))
-    return path.replace("/messages", "/v1/messages");
-  if (path === "/v1/messages" || path.startsWith("/v1/messages?")) return path;
-  if (path === "/v1/chat/completions" || path.startsWith("/v1/chat/completions?")) return path;
-  return path;
-}
-
-function isWafBlock(statusCode, body) {
-  if (statusCode !== 405 && statusCode !== 403) return false;
-  const html = typeof body === "string" ? body : body.toString("utf8");
-  return html.includes("alicdn") || html.includes("block_message") || html.includes("renderData");
-}
-
-function isRetryable(statusCode, errorMessage) {
-  if (statusCode >= 500 && statusCode <= 599) return true;
-  if (!statusCode) return true;
-  if (errorMessage && (errorMessage.includes("socket hang up") || errorMessage.includes("timeout") || errorMessage.includes("ECONNRESET") || errorMessage.includes("ETIMEDOUT") || errorMessage.includes("ENETUNREACH"))) return true;
-  return false;
-}
-
-function extractWafCookies(res) {
-  const cookies = res.headers["set-cookie"] || [];
-  const waf = [];
-  for (const c of cookies) {
-    const name = c.split("=")[0];
-    if (name === "acw_tc" || name === "acw_sc__v2" || name === "cdn_sec_tc") {
-      waf.push(c.split(";")[0]);
-    }
-  }
-  return waf;
-}
-
-function injectPrompt(rawBody, path, prompt) {
-  if (!prompt || !rawBody.length) return rawBody;
-  try {
-    const body = JSON.parse(rawBody.toString("utf8"));
-    if (!body) return rawBody;
-    if (path.startsWith("/v1/messages")) {
-      if (typeof body.system === "string") {
-        body.system = prompt + "\n\n" + body.system;
-      } else if (Array.isArray(body.system)) {
-        body.system.unshift({ type: "text", text: prompt });
-      } else {
-        body.system = [{ type: "text", text: prompt }];
-      }
-    }
-    if (path.startsWith("/v1/chat/completions") && Array.isArray(body.messages)) {
-      body.messages.unshift({ role: "system", content: prompt });
-    }
-    return Buffer.from(JSON.stringify(body), "utf8");
-  } catch {
-    return rawBody;
-  }
-}
-
-function truncate(str, max = 500) {
-  if (!str || str.length <= max) return str;
-  return str.slice(0, max) + `... (${str.length - max} more bytes)`;
-}
-
-function summarizeRequest(rawBody, path, method = "POST") {
-  const summary = { method, path, bodyBytes: rawBody.length, parseOk: false };
-  try {
-    const body = JSON.parse(rawBody.toString("utf8"));
-    summary.parseOk = true;
-    summary.model = typeof body.model === "string" ? body.model : null;
-    summary.stream = body.stream === true;
-    summary.maxTokens = typeof body.max_tokens === "number" ? body.max_tokens : null;
-    summary.messageCount = Array.isArray(body.messages) ? body.messages.length : null;
-  } catch {}
-  return summary;
-}
-
-function redactSensitive(value) {
-  if (typeof value !== "string") return value;
-  return value.replace(/sk[-_][A-Za-z0-9_-]+/g, "[redacted]");
-}
-
-function responseHasEmptyOutput(statusCode, body) {
-  if (statusCode !== 200 || !body?.length) return false;
-  try {
-    const parsed = JSON.parse(body.toString("utf8"));
-    if (Array.isArray(parsed.content)) {
-      return parsed.content.every((part) => part?.type !== "text" || !part.text);
-    }
-    const content = parsed.choices?.[0]?.message?.content;
-    return typeof content === "string" && content.length === 0;
-  } catch {
-    return false;
-  }
-}
+import {
+  SSE_EOM, KEEPALIVE_THRESHOLD, MAX_BODY_SIZE,
+  truncate, filterHeaders, rewritePath,
+  isWafBlock, isRetryable, injectPrompt, summarizeRequest, responseHasEmptyOutput, redactSensitive,
+  normalizeSetCookie,
+} from "../../src/utils.mjs";
+import { extractWafCookies } from "../../src/auth/waf.mjs";
 
 // ════════════════ TESTS ════════════════
 
@@ -216,6 +115,12 @@ describe("unit: extractWafCookies", () => {
   it("handles missing set-cookie header", () => {
     const res = { headers: {} };
     assert.deepStrictEqual(extractWafCookies(res), []);
+  });
+  it("handles single string set-cookie value", () => {
+    const res = { headers: { "set-cookie": "acw_tc=xyz; Path=/" } };
+    const cookies = extractWafCookies(res);
+    assert.equal(cookies.length, 1);
+    assert.equal(cookies[0], "acw_tc=xyz");
   });
 });
 
@@ -329,5 +234,29 @@ describe("unit: safe debug helpers", () => {
     assert.equal(responseHasEmptyOutput(200, Buffer.from(JSON.stringify({ content: [{ type: "text", text: "" }] }))), true);
     assert.equal(responseHasEmptyOutput(200, Buffer.from(JSON.stringify({ choices: [{ message: { content: "" } }] }))), true);
     assert.equal(responseHasEmptyOutput(200, Buffer.from(JSON.stringify({ content: [{ type: "text", text: "ok" }] }))), false);
+  });
+});
+
+describe("unit: normalizeSetCookie", () => {
+  it("converts string to array", () => {
+    const input = { "set-cookie": "acw_tc=xyz" };
+    normalizeSetCookie(input);
+    assert.ok(Array.isArray(input["set-cookie"]));
+    assert.equal(input["set-cookie"].length, 1);
+    assert.equal(input["set-cookie"][0], "acw_tc=xyz");
+  });
+  it("preserves existing array", () => {
+    const input = { "set-cookie": ["a=1", "b=2"] };
+    normalizeSetCookie(input);
+    assert.ok(Array.isArray(input["set-cookie"]));
+    assert.equal(input["set-cookie"].length, 2);
+  });
+  it("handles missing set-cookie header", () => {
+    const input = { "content-type": "text/html" };
+    normalizeSetCookie(input);
+    assert.equal(input["set-cookie"], undefined);
+  });
+  it("handles null input", () => {
+    assert.equal(normalizeSetCookie(null), null);
   });
 });
