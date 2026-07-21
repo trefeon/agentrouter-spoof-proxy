@@ -15,6 +15,38 @@ export function truncate(str, max = 500) {
   return str.slice(0, max) + `... (${str.length - max} more bytes)`;
 }
 
+export function redactSensitive(value) {
+  if (typeof value !== "string") return value;
+  return value.replace(/sk[-_][A-Za-z0-9_-]+/g, "[redacted]");
+}
+
+export function summarizeRequest(rawBody, path, method = "POST") {
+  const summary = { method, path, bodyBytes: rawBody.length, parseOk: false };
+  try {
+    const body = JSON.parse(rawBody.toString("utf8"));
+    summary.parseOk = true;
+    summary.model = typeof body.model === "string" ? body.model : null;
+    summary.stream = body.stream === true;
+    summary.maxTokens = typeof body.max_tokens === "number" ? body.max_tokens : null;
+    summary.messageCount = Array.isArray(body.messages) ? body.messages.length : null;
+  } catch {}
+  return summary;
+}
+
+export function responseHasEmptyOutput(statusCode, body) {
+  if (statusCode !== 200 || !body?.length) return false;
+  try {
+    const parsed = JSON.parse(body.toString("utf8"));
+    if (Array.isArray(parsed.content)) {
+      return parsed.content.every((part) => part?.type !== "text" || !part.text);
+    }
+    const content = parsed.choices?.[0]?.message?.content;
+    return typeof content === "string" && content.length === 0;
+  } catch {
+    return false;
+  }
+}
+
 export function filterHeaders(headers) {
   if (!headers) return {};
   const out = {};

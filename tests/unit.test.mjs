@@ -77,6 +77,38 @@ function truncate(str, max = 500) {
   return str.slice(0, max) + `... (${str.length - max} more bytes)`;
 }
 
+function summarizeRequest(rawBody, path, method = "POST") {
+  const summary = { method, path, bodyBytes: rawBody.length, parseOk: false };
+  try {
+    const body = JSON.parse(rawBody.toString("utf8"));
+    summary.parseOk = true;
+    summary.model = typeof body.model === "string" ? body.model : null;
+    summary.stream = body.stream === true;
+    summary.maxTokens = typeof body.max_tokens === "number" ? body.max_tokens : null;
+    summary.messageCount = Array.isArray(body.messages) ? body.messages.length : null;
+  } catch {}
+  return summary;
+}
+
+function redactSensitive(value) {
+  if (typeof value !== "string") return value;
+  return value.replace(/sk[-_][A-Za-z0-9_-]+/g, "[redacted]");
+}
+
+function responseHasEmptyOutput(statusCode, body) {
+  if (statusCode !== 200 || !body?.length) return false;
+  try {
+    const parsed = JSON.parse(body.toString("utf8"));
+    if (Array.isArray(parsed.content)) {
+      return parsed.content.every((part) => part?.type !== "text" || !part.text);
+    }
+    const content = parsed.choices?.[0]?.message?.content;
+    return typeof content === "string" && content.length === 0;
+  } catch {
+    return false;
+  }
+}
+
 // ════════════════ TESTS ════════════════
 
 describe("unit: rewritePath", () => {
@@ -264,5 +296,38 @@ describe("unit: truncate", () => {
   });
   it("handles empty", () => {
     assert.equal(truncate("", 10), "");
+  });
+});
+
+describe("unit: safe debug helpers", () => {
+  it("summarizes request metadata without prompt content", () => {
+    const raw = Buffer.from(JSON.stringify({
+      model: "glm-5.2",
+      max_tokens: 64,
+      stream: true,
+      messages: [{ role: "user", content: "secret prompt text" }],
+    }));
+    const out = summarizeRequest(raw, "/v1/messages");
+    assert.deepStrictEqual(out, {
+      method: "POST",
+      path: "/v1/messages",
+      bodyBytes: raw.length,
+      parseOk: true,
+      model: "glm-5.2",
+      stream: true,
+      maxTokens: 64,
+      messageCount: 1,
+    });
+    assert.equal(JSON.stringify(out).includes("secret prompt text"), false);
+  });
+
+  it("redacts API key shaped secrets", () => {
+    assert.equal(redactSensitive("Bearer sk-test_ABC123 and sk_9router_test"), "Bearer [redacted] and [redacted]");
+  });
+
+  it("detects empty Anthropic and OpenAI outputs", () => {
+    assert.equal(responseHasEmptyOutput(200, Buffer.from(JSON.stringify({ content: [{ type: "text", text: "" }] }))), true);
+    assert.equal(responseHasEmptyOutput(200, Buffer.from(JSON.stringify({ choices: [{ message: { content: "" } }] }))), true);
+    assert.equal(responseHasEmptyOutput(200, Buffer.from(JSON.stringify({ content: [{ type: "text", text: "ok" }] }))), false);
   });
 });

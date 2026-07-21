@@ -18,6 +18,7 @@ const {
   SSE_CHUNK_TIMEOUT_MS = "30000",
   RESPONSE_TIMEOUT_MS = "30000",
   LOG_LEVEL = "info",
+  SLOW_RESPONSE_MS = "15000",
 } = process.env;
 
 export const PORT = parseInt(LISTEN_PORT, 10);
@@ -31,6 +32,7 @@ export const SSE_IDLE = parseInt(SSE_IDLE_TIMEOUT_MS, 10);
 export const SSE_CHUNK_TIMEOUT = parseInt(SSE_CHUNK_TIMEOUT_MS, 10);
 export const RESPONSE_TIMEOUT = parseInt(RESPONSE_TIMEOUT_MS, 10);
 export const IS_DEBUG = LOG_LEVEL === "debug";
+export const SLOW_RESPONSE_MS_INT = parseInt(SLOW_RESPONSE_MS, 10);
 
 export const TARGET_HOST_VAL = TARGET_HOST;
 export const MODELS_CSV_VAL = MODELS_CSV;

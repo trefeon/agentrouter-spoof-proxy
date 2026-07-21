@@ -6,11 +6,12 @@ import { log, logDebug } from "./src/logger.mjs";
 import { isCircuitOpen, recordSuccess, recordFailure, getConsecutiveFails } from "./src/circuit-breaker.mjs";
 import { getWafCookie, warmup } from "./src/waf.mjs";
 import { getModelsList, getModelSource, fetchModels } from "./src/models.mjs";
-import { getHealthyModels, startProbeLoop, stopProbeLoop, markModelFailed, markModelExhausted } from "./src/model-health.mjs";
+import { getHealthyModels, startProbeLoop, stopProbeLoop, markModelFailed, markModelExhausted, markModelDegraded } from "./src/model-health.mjs";
+import { recordModelStart, recordModelResult, getModelStats } from "./src/model-stats.mjs";
 import {
   SSE_EOM, KEEPALIVE_THRESHOLD, MAX_BODY_SIZE,
   truncate, filterHeaders, rewritePath, respondJson,
-  isWafBlock, isRetryable, injectPrompt,
+  isWafBlock, isRetryable, injectPrompt, summarizeRequest, responseHasEmptyOutput, redactSensitive,
 } from "./src/utils.mjs";
 
 // ── Spoof headers ──
@@ -86,6 +87,7 @@ const server = http.createServer((req, res) => {
       wafCookie: !!getWafCookie(),
       circuitOpen: isCircuitOpen(),
       consecutiveFails: getConsecutiveFails(),
+      modelHealth: getModelStats(),
     });
     return;
   }
@@ -147,7 +149,8 @@ const server = http.createServer((req, res) => {
     hasEnded = true;
     const path = rewritePath(rawPath);
     const fullBody = Buffer.concat(body);
-    logDebug(ts, `${method} ${rawPath} -> REQUEST BODY: ${truncate(fullBody.toString("utf8"), 1000)}`);
+    const requestSummary = summarizeRequest(fullBody, path, method);
+    logDebug(ts, `${method} ${rawPath} -> REQUEST ${JSON.stringify(requestSummary)}`);
 
     // Adaptive response timeout — larger bodies need more upstream processing time
     const adaptiveResponseTimeout = (() => {
@@ -162,6 +165,7 @@ const server = http.createServer((req, res) => {
     // Extract model from body for reactive health marking
     let requestModel = null;
     try { requestModel = JSON.parse(fullBody.toString("utf8"))?.model || null; } catch {}
+    if (requestModel) recordModelStart(requestModel);
 
     const upstreamHeaders = {
       ...SPOOF_HEADERS,
@@ -221,6 +225,7 @@ const server = http.createServer((req, res) => {
           upstreamResponded = true;
           clearIdleTimer();
           const statusCode = upstreamRes.statusCode;
+          const upstreamStart = Date.now();
 
           // WAF block → re-warmup & retry once
           if ((statusCode === 405 || statusCode === 403) && attempt === 0) {
@@ -228,9 +233,12 @@ const server = http.createServer((req, res) => {
             upstreamRes.on("data", (c) => chunks.push(c));
             upstreamRes.on("end", async () => {
               const raw = Buffer.concat(chunks);
+              const emptyOutput = responseHasEmptyOutput(statusCode, raw);
+              if (emptyOutput) markModelDegraded(requestModel, "empty_output");
               if (isWafBlock(statusCode, raw)) {
                 log(ts, `WAF ${statusCode} detected, refreshing cookie and retrying...`);
                 await warmup();
+                recordModelResult(requestModel, { statusCode, durationMs: Date.now() - upstreamStart, wafBlock: true, error: "waf_block", emptyOutput });
                 const newCookie = getWafCookie();
                 if (newCookie) upstreamHeaders["Cookie"] = newCookie;
                 const result = await doRequest(attempt + 1);
@@ -238,7 +246,8 @@ const server = http.createServer((req, res) => {
                 return;
               }
               log(ts, `${method} ${rawPath} <- ${statusCode} (${raw.length}b)`);
-              log(ts, `RESPONSE BODY: ${raw.toString("utf8").slice(0, 2000)}`);
+              log(ts, `RESPONSE BODY: ${redactSensitive(truncate(raw.toString("utf8"), 1000))}`);
+              recordModelResult(requestModel, { statusCode, durationMs: Date.now() - upstreamStart, error: `http_${statusCode}`, emptyOutput });
               recordFailure();
               safeWriteHead(statusCode, filterHeaders(upstreamRes.headers));
               safeEnd(raw);
@@ -252,6 +261,7 @@ const server = http.createServer((req, res) => {
           if (isRetryable(statusCode, null) && attempt < cfg.MAX_RETRIES_NUM) {
             upstreamRes.resume();
             errorHandled = true;
+            recordModelResult(requestModel, { statusCode, durationMs: Date.now() - upstreamStart, error: `retry_${statusCode}` });
             log(ts, `${method} ${rawPath} <- ${statusCode}, retrying (${attempt + 1}/${cfg.MAX_RETRIES_NUM})...`);
             const delay = cfg.RETRY_DELAY * Math.pow(2, attempt);
             setTimeout(async () => {
@@ -286,13 +296,17 @@ const server = http.createServer((req, res) => {
             upstreamRes.on("data", (c) => errChunks.push(c));
             upstreamRes.on("end", () => {
               const raw = Buffer.concat(errChunks);
+              const emptyOutput = responseHasEmptyOutput(statusCode, raw);
+              if (emptyOutput) markModelDegraded(requestModel, "empty_output");
               log(ts, `${method} ${rawPath} <- ${statusCode} (${raw.length}b)`);
-              log(ts, `RESPONSE BODY: ${raw.toString("utf8").slice(0, 2000)}`);
+              log(ts, `RESPONSE BODY: ${redactSensitive(truncate(raw.toString("utf8"), 1000))}`);
+              recordModelResult(requestModel, { statusCode, durationMs: Date.now() - upstreamStart, error: `http_${statusCode}`, emptyOutput });
               safeEnd(raw);
               finishProxy();
               resolveProxy();
             });
             upstreamRes.on("error", () => {
+              recordModelResult(requestModel, { statusCode, durationMs: Date.now() - upstreamStart, error: "upstream_response_error" });
               safeEnd();
               finishProxy();
               resolveProxy();
@@ -335,6 +349,8 @@ const server = http.createServer((req, res) => {
                 } else {
                   log(ts, `${method} ${rawPath} <- SSE CHUNK TIMEOUT (${timeout / 1000}s no data)`);
                 }
+                recordModelResult(requestModel, { statusCode: 504, durationMs: Date.now() - reqStart, chunks: chunkCount, error: sawDataEvent ? "sse_chunk_timeout" : "keepalive_only" });
+                markModelDegraded(requestModel, sawDataEvent ? "sse_chunk_timeout" : "keepalive_only");
                 if (!sawMessageStop) { safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`); }
                 safeEnd();
                 if (!upstreamReq.destroyed) upstreamReq.destroy();
@@ -360,6 +376,8 @@ const server = http.createServer((req, res) => {
               idleTimer = setTimeout(() => {
                 if (streamFinished) return;
                 log(ts, `${method} ${rawPath} <- SSE IDLE TIMEOUT (${cfg.SSE_IDLE / 1000}s no data)`);
+                recordModelResult(requestModel, { statusCode: 504, durationMs: Date.now() - reqStart, chunks: chunkCount, error: "sse_idle_timeout" });
+                markModelDegraded(requestModel, "sse_idle_timeout");
                 if (!sawMessageStop) { safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`); }
                 safeEnd();
                 if (!upstreamReq.destroyed) upstreamReq.destroy();
@@ -398,9 +416,13 @@ const server = http.createServer((req, res) => {
             if (streamFinished) return;
             if (isSse && !sawDataEvent) {
               log(ts, `${method} ${rawPath} <- EMPTY SSE STREAM (${chunkCount} chunks, max ${maxChunkSize}b)`);
+              markModelDegraded(requestModel, "empty_sse");
             }
             safeEnd();
-            log(ts, `${method} ${rawPath} <- 200 (stream complete, ${Date.now() - reqStart}ms, ${chunkCount} chunks)`);
+            const durationMs = Date.now() - reqStart;
+            recordModelResult(requestModel, { statusCode: 200, durationMs, chunks: chunkCount, emptyOutput: isSse && !sawDataEvent });
+            if (durationMs >= cfg.SLOW_RESPONSE_MS_INT) markModelDegraded(requestModel, `slow_${durationMs}ms`);
+            log(ts, `${method} ${rawPath} <- 200 (stream complete, ${durationMs}ms, ${chunkCount} chunks)`);
             finishStream();
           });
 
@@ -408,6 +430,7 @@ const server = http.createServer((req, res) => {
             if (streamFinished) return;
             const causeCode = e.cause?.code ? ` (cause: ${e.cause.code})` : "";
             log(ts, `${method} ${rawPath} <- UPSTREAM STREAM ERROR: ${e.message}${causeCode}`);
+            recordModelResult(requestModel, { statusCode: 502, durationMs: Date.now() - reqStart, chunks: chunkCount, error: e.message });
             if (isSse && !sawMessageStop) { safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`); }
             safeEnd();
             finishStream();
@@ -416,8 +439,9 @@ const server = http.createServer((req, res) => {
           upstreamRes.on("close", () => {
             if (streamFinished) return;
             if (!res.writableEnded) {
-              log(ts, `${method} ${rawPath} <- UPSTREAM CLOSED (connection terminated prematurely, ${Date.now() - reqStart}ms, ${chunkCount} chunks)`);
-              if (isSse && !sawMessageStop) { safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`); }
+                log(ts, `${method} ${rawPath} <- UPSTREAM CLOSED (connection terminated prematurely, ${Date.now() - reqStart}ms, ${chunkCount} chunks)`);
+                recordModelResult(requestModel, { statusCode: 502, durationMs: Date.now() - reqStart, chunks: chunkCount, error: "upstream_closed" });
+                if (isSse && !sawMessageStop) { safeWrite(`\n${SSE_EOM}\ndata: {}\n\n`); }
               safeEnd();
             }
             finishStream();
@@ -457,6 +481,7 @@ const server = http.createServer((req, res) => {
           if (res.headersSent) {
             recordFailure();
             log(ts, `${method} ${rawPath} -> STREAM ERROR after partial response: ${e.message}`);
+            recordModelResult(requestModel, { statusCode: 502, error: e.message });
             if (isSse && !sawMessageStop) { try { res.write(`\n${SSE_EOM}\ndata: {}\n\n`); } catch {} }
             try { res.end(); } catch {}
             finishProxy();
@@ -477,6 +502,7 @@ const server = http.createServer((req, res) => {
           recordFailure();
           markModelFailed(requestModel, 503);
           log(ts, `${method} ${rawPath} -> ERROR: ${e.message} (final)`);
+          recordModelResult(requestModel, { statusCode: e.message === "timeout" || e.message === "upstream response timeout" ? 504 : 502, error: e.message });
           if (e.message === "timeout" || e.message === "upstream response timeout") {
             safeRespondJson(504, { error: { code: "timeout", message: "Upstream request timed out", type: "proxy_error" } });
           } else {

@@ -41,6 +41,13 @@ export function markModelExhausted(modelId) {
   log(ts, `MODEL EXHAUSTED (429): ${modelId} — locked for 120s`);
 }
 
+export function markModelDegraded(modelId, reason = "degraded") {
+  if (!modelId) return;
+  failedUntil.set(modelId, Date.now() + 60000);
+  const ts = new Date().toISOString();
+  log(ts, `MODEL DEGRADED: ${modelId} (${reason}) — locked for 60s`);
+}
+
 function clearModelLock(modelId) {
   failedUntil.delete(modelId);
   failCounts.delete(modelId);

@@ -168,6 +168,7 @@ describe("agentrouter-spoof-proxy", () => {
       assert.equal(typeof body.circuitOpen, "boolean");
       assert.equal(typeof body.upstream, "string");
       assert.ok(body.staticModels >= 1);
+      assert.ok(Array.isArray(body.modelHealth));
     });
 
     it("reports activeStreams as 0 at startup", async () => {
@@ -186,6 +187,29 @@ describe("agentrouter-spoof-proxy", () => {
       assert.ok(Array.isArray(body.data));
       assert.ok(body.data.length >= 1);
       assert.ok(body.data.some((m) => m.id === "claude-opus-4-8"));
+    });
+  });
+
+  describe("model reliability telemetry", () => {
+    it("records model success metrics without prompt content", async () => {
+      mock.setScenario("success");
+      await collectSse(fetchStream(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+        method: "POST",
+        headers: proxyHeaders(),
+        body: JSON.stringify({
+          model: "claude-opus-4-8",
+          messages: [{ role: "user", content: "super secret prompt text" }],
+          stream: true,
+          max_tokens: 10,
+        }),
+      }));
+
+      const res = await fetch(`http://127.0.0.1:${proxyPort}/health`);
+      const body = JSON.parse(res.body);
+      const stat = body.modelHealth.find((m) => m.model === "claude-opus-4-8");
+      assert.ok(stat, "model stat exists");
+      assert.ok(stat.successes >= 1);
+      assert.equal(JSON.stringify(stat).includes("super secret prompt text"), false);
     });
   });
 
