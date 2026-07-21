@@ -1,6 +1,6 @@
 # AgentRouter Spoof Proxy
 
-Lightweight Node.js reverse proxy that bypasses AgentRouter WAF by spoofing Claude Code headers. Zero dependencies, ~550 lines orchestration + 6 small modules, 120MB Docker image.
+Lightweight Node.js reverse proxy that bypasses AgentRouter WAF by spoofing Claude Code headers. Zero dependencies, ~600 lines orchestration + 8 small modules, 120MB Docker image.
 
 > 🇮🇩 **[Panduan 9Router Bahasa Indonesia](docs/panduan-9router.md)** — Tutorial lengkap untuk teman-teman Indonesia.
 
@@ -136,14 +136,16 @@ Client → 9Router → agentrouter-proxy:8318 → agentrouter.org (upstream)
 ```
 
 ```
-proxy.mjs (350 lines, orchestration)
-├── src/config.mjs      — env + constants + agent pool
-├── src/logger.mjs      — logging
-├── src/utils.mjs       — pure functions (path, headers, injection, etc.)
-├── src/circuit-breaker.mjs — circuit breaker state
-├── src/waf.mjs         — WAF cookie warmup
-├── src/models.mjs      — static/dynamic model discovery
-└── src/model-health.mjs — auto-detect failing models, recovery probe
+proxy.mjs (~600 lines, orchestration)
+├── src/config.mjs              — env + constants + agent pool
+├── src/logger.mjs              — logging
+├── src/utils.mjs               — pure functions (path, headers, injection, etc.)
+├── src/auth/spoof.mjs          — Claude Code header spoofing
+├── src/auth/waf.mjs            — WAF cookie warmup
+├── src/models/discovery.mjs    — static/dynamic model discovery
+├── src/models/health.mjs       — auto-detect failing models, recovery probe
+├── src/models/stats.mjs        — model success metrics
+└── src/resilience/circuit-breaker.mjs — circuit breaker state
 ```
 
 ---
@@ -151,10 +153,10 @@ proxy.mjs (350 lines, orchestration)
 ## Running Tests
 
 ```bash
-# Fast unit tests — pure functions, no network (43 tests, <500ms)
-node --test tests/unit.test.mjs
+# Fast unit tests — pure functions, no network (51 tests, <500ms)
+node --test tests/unit/utils.test.mjs
 
-# E2E tests — spawns proxy + mock upstream (28 tests, ~12s)
+# E2E tests — spawns proxy + mock upstream (30 tests, ~12s)
 node --test tests/proxy.test.mjs
 ```
 

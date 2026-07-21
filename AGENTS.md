@@ -59,15 +59,18 @@ Expected: `"ok":true,"wafCookie":true`
 
 | File | Purpose |
 |------|---------|
-| `proxy.mjs` | Main orchestration (~350 lines) |
+| `proxy.mjs` | Main orchestration (core module) |
 | `src/config.mjs` | Env config + agent pool |
 | `src/utils.mjs` | Pure functions (path, headers, injection) |
-| `src/circuit-breaker.mjs` | Circuit breaker |
-| `src/waf.mjs` | WAF cookie warmup |
-| `src/models.mjs` | Model discovery |
-| `src/model-health.mjs` | Auto-detect failing models |
-| `tests/unit.test.mjs` | 43 unit tests (<500ms) |
-| `tests/proxy.test.mjs` | 28 E2E tests |
+| `src/logger.mjs` | Logging |
+| `src/auth/spoof.mjs` | Claude Code header spoofing |
+| `src/auth/waf.mjs` | WAF cookie warmup |
+| `src/models/discovery.mjs` | Static/dynamic model discovery |
+| `src/models/health.mjs` | Auto-detect failing models |
+| `src/models/stats.mjs` | Model success metrics |
+| `src/resilience/circuit-breaker.mjs` | Circuit breaker |
+| `tests/unit/utils.test.mjs` | 51 unit tests (<500ms) |
+| `tests/proxy.test.mjs` | 30 E2E tests |
 | `docs/panduan-9router.md` | 🇮🇩 Panduan Bahasa Indonesia |
 
 ---
