@@ -2,6 +2,10 @@
 
 A lightweight Node.js reverse proxy that injects Claude Code spoof headers and maintains WAF cookies to bypass AgentRouter restrictions. Zero dependencies, single-file, ~780 lines, 120MB Docker image.
 
+> 🇮🇩 **[Panduan Integrasi 9Router Bahasa Indonesia](docs/panduan-9router.md)** — Tutorial lengkap konfigurasi middleware dengan 9Router untuk teman-teman dari Indonesia.
+
+---
+
 ## Architecture
 
 ```
