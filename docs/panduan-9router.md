@@ -11,7 +11,7 @@
 ```
 ┌──────────────┐     ┌────────────────────────┐     ┌──────────────────────┐     ┌──────────────────┐
 │  Client AI   │ ──→ │       9Router          │ ──→ │  agentrouter-proxy   │ ──→ │ agentrouter.org  │
-│  (opencode,  │     │  (load balancer/router) │     │  :8318 (spoof proxy) │     │  (upstream)      │
+│  (opencode,  │     │ (load balancer/router) │     │  :8318 (spoof proxy) │     │  (upstream)      │
 │   Cursor,    │     │                        │     │                      │     │                  │
 │   dll.)      │     │                        │     │                      │     │                  │
 └──────────────┘     └────────────────────────┘     └──────────────────────┘     └──────────────────┘
