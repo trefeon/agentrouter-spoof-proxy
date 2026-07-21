@@ -6,7 +6,7 @@ import { log, logDebug } from "./src/logger.mjs";
 import { isCircuitOpen, recordSuccess, recordFailure, getConsecutiveFails } from "./src/circuit-breaker.mjs";
 import { getWafCookie, warmup } from "./src/waf.mjs";
 import { getModelsList, getModelSource, fetchModels } from "./src/models.mjs";
-import { getHealthyModels, startProbeLoop, stopProbeLoop, markModelFailed } from "./src/model-health.mjs";
+import { getHealthyModels, startProbeLoop, stopProbeLoop, markModelFailed, markModelExhausted } from "./src/model-health.mjs";
 import {
   SSE_EOM, KEEPALIVE_THRESHOLD, MAX_BODY_SIZE,
   truncate, filterHeaders, rewritePath, respondJson,
@@ -19,7 +19,7 @@ const SPOOF_HEADERS = {
   "User-Agent": "claude-cli/2.1.92 (external, sdk-cli)",
   "Anthropic-Version": "2023-06-01",
   "Anthropic-Beta":
-    "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28",
+    "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24,structured-outputs-2025-12-15,fast-mode-2026-02-01,token-efficient-tools-2026-03-28",
   "Anthropic-Dangerous-Direct-Browser-Access": "true",
   "X-App": "cli",
   "X-Stainless-Helper-Method": "stream",
@@ -260,6 +260,9 @@ const server = http.createServer((req, res) => {
             }, delay).unref();
             return;
           }
+
+          // Immediately remove rate-limited models so 9Router falls back
+          if (statusCode === 429) markModelExhausted(requestModel);
 
           if (statusCode >= 500) markModelFailed(requestModel, statusCode);
 
