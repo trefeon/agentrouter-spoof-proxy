@@ -239,7 +239,7 @@ Model yang akan muncul:
 - `claude-opus-4-7`
 - `claude-opus-4-8`
 - `glm-5.2`
-- `gpt-5.5` (akan 403 — tidak bisa dipakai)
+- `gpt-5.5` (kadang muncul, kuota terbatas — bisa 403)
 
 Jika mengaktifkan **Model Auto-Discovery** (dengan `AR_API_KEY`), model yang tampil akan sesuai dengan akun agentrouter.org kamu.
 
@@ -343,7 +343,7 @@ Masukkan API key 9Router (bukan API key agentrouter).
 | `AG-claude-opus-4-7` | Claude Opus 4.7 | 1M | 128k |
 | `AG-claude-opus-4-8` | Claude Opus 4.8 (irit token ~35%) | 1M | 128k |
 | `AG-glm-5.2` | GLM 5.2 (lebih murah) | 1M | 131k |
-| `AG-gpt-5.5` | ❌ Selalu 403 — tidak bisa dipakai | — | — |
+| `AG-gpt-5.5` | Kadang muncul, kuota terbatas — bisa 403 | — | — |
 
 ---
 
