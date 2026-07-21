@@ -149,6 +149,16 @@ const server = http.createServer((req, res) => {
     const fullBody = Buffer.concat(body);
     logDebug(ts, `${method} ${rawPath} -> REQUEST BODY: ${truncate(fullBody.toString("utf8"), 1000)}`);
 
+    // Adaptive response timeout — larger bodies need more upstream processing time
+    const adaptiveResponseTimeout = (() => {
+      const mb = fullBody.length / (1024 * 1024);
+      if (mb > 5) return 300000;     // 5min for >5MB
+      if (mb > 2) return 180000;     // 3min for 2-5MB
+      if (mb > 1) return 120000;     // 2min for 1-2MB
+      if (mb > 0.5) return 90000;    // 90s for 500KB-1MB
+      return cfg.RESPONSE_TIMEOUT;   // default 30s for small payloads
+    })();
+
     // Extract model from body for reactive health marking
     let requestModel = null;
     try { requestModel = JSON.parse(fullBody.toString("utf8"))?.model || null; } catch {}
@@ -413,14 +423,14 @@ const server = http.createServer((req, res) => {
 
         currentUpstreamReq = upstreamReq;
 
-        // Response timeout
+        // Response timeout: adaptive based on body size
         responseTimer = setTimeout(() => {
           if (upstreamResponded) return;
           if (errorHandled) return;
           errorHandled = true;
           clearIdleTimer();
           if (!upstreamReq.destroyed) upstreamReq.destroy(new Error('upstream response timeout'));
-        }, cfg.RESPONSE_TIMEOUT);
+        }, adaptiveResponseTimeout);
         responseTimer.unref();
 
         upstreamReq.on("timeout", () => {
