@@ -115,13 +115,13 @@ See `.env.example` for the full list (14 variables).
 
 ## Models
 
-| Model | Context | Input/Output per MTok | Provider |
-|-------|---------|----------------------|----------|
-| `claude-opus-4-8` | 1M | $5 / $25 | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) |
-| `claude-opus-4-7` | 1M | $5 / $25 | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) |
-| `claude-opus-4-6` | 1M | $5 / $25 | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) |
-| `gpt-5.5` | 1M | $5 / $30 | [OpenAI](https://openai.com/index/introducing-gpt-5-5/) |
-| `glm-5.2` | 1M | ~$0.84 / ~$2.63 | [ZhipuAI](https://docs.bigmodel.cn/cn/guide/start/model-overview) |
+| Model | Context | Max output | Input/Output per MTok | Provider |
+|-------|---------|------------|----------------------|----------|
+| `claude-opus-4-8` | 1M | 128K | $5 / $25 | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) |
+| `claude-opus-4-7` | 1M | 128K | $5 / $25 | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) |
+| `claude-opus-4-6` | 1M | 128K | $5 / $25 | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) |
+| `gpt-5.5` | 1.05M | 128K | $5 / $30 | [OpenAI](https://developers.openai.com/docs/models/gpt-5.5) |
+| `glm-5.2` | 1M | 128K | ~$0.84 / ~$2.63 | [ZhipuAI](https://docs.bigmodel.cn/cn/guide/start/model-overview) |
 
 ---
 
