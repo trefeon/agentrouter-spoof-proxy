@@ -121,7 +121,7 @@ See `.env.example` for the full list (14 variables).
 | `claude-opus-4-7` | Solid, sometimes 500 upstream |
 | `claude-opus-4-6` | Same as 4.7 |
 | `glm-5.2` | Cheaper alternative |
-| `gpt-5.5` | Occasionally available, limited quota |
+| `gpt-5.5` | Fully available |
 
 ---
 
