@@ -6,6 +6,7 @@ import { log, logDebug } from "./src/logger.mjs";
 import { isCircuitOpen, recordSuccess, recordFailure, getConsecutiveFails } from "./src/circuit-breaker.mjs";
 import { getWafCookie, warmup } from "./src/waf.mjs";
 import { getModelsList, getModelSource, fetchModels } from "./src/models.mjs";
+import { getHealthyModels, startProbeLoop, stopProbeLoop, markModelFailed } from "./src/model-health.mjs";
 import {
   SSE_EOM, KEEPALIVE_THRESHOLD, MAX_BODY_SIZE,
   truncate, filterHeaders, rewritePath, respondJson,
@@ -89,9 +90,9 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Model list
+  // Model list — filter unhealthy models so 9Router falls back instantly
   if (method === "GET" && (rawPath === "/v1/models" || rawPath === "/models")) {
-    respondJson(res, 200, { data: getModelsList(), object: "list" });
+    respondJson(res, 200, { data: getHealthyModels(getModelsList()), object: "list" });
     return;
   }
 
@@ -145,7 +146,12 @@ const server = http.createServer((req, res) => {
   req.on("end", () => {
     hasEnded = true;
     const path = rewritePath(rawPath);
-    logDebug(ts, `${method} ${rawPath} -> REQUEST BODY: ${truncate(Buffer.concat(body).toString("utf8"), 1000)}`);
+    const fullBody = Buffer.concat(body);
+    logDebug(ts, `${method} ${rawPath} -> REQUEST BODY: ${truncate(fullBody.toString("utf8"), 1000)}`);
+
+    // Extract model from body for reactive health marking
+    let requestModel = null;
+    try { requestModel = JSON.parse(fullBody.toString("utf8"))?.model || null; } catch {}
 
     const upstreamHeaders = {
       ...SPOOF_HEADERS,
@@ -232,7 +238,7 @@ const server = http.createServer((req, res) => {
             return;
           }
 
-          // 5xx retry
+          // 5xx retry — if exhausted, mark model unhealthy
           if (isRetryable(statusCode, null) && attempt < cfg.MAX_RETRIES_NUM) {
             upstreamRes.resume();
             errorHandled = true;
@@ -244,6 +250,8 @@ const server = http.createServer((req, res) => {
             }, delay).unref();
             return;
           }
+
+          if (statusCode >= 500) markModelFailed(requestModel, statusCode);
 
           recordSuccess();
 
@@ -454,6 +462,7 @@ const server = http.createServer((req, res) => {
           }
 
           recordFailure();
+          markModelFailed(requestModel, 503);
           log(ts, `${method} ${rawPath} -> ERROR: ${e.message} (final)`);
           if (e.message === "timeout" || e.message === "upstream response timeout") {
             safeRespondJson(504, { error: { code: "timeout", message: "Upstream request timed out", type: "proxy_error" } });
@@ -513,10 +522,12 @@ server.listen(cfg.PORT, "0.0.0.0", async () => {
   await resolveDns();
   scheduleWarmup();
   scheduleDiscovery();
+  startProbeLoop(getModelsList, getWafCookie, SPOOF_HEADERS);
 });
 
 function shutdown(signal) {
   console.log(`\n[${new Date().toISOString()}] ${signal} received — draining ${activeStreams} active streams...`);
+  stopProbeLoop();
   server.close(() => {
     cfg.AGENT.destroy();
     console.log(`[${new Date().toISOString()}] Server closed, exiting.`);
