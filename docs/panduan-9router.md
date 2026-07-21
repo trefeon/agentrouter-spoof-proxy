@@ -105,11 +105,15 @@ Hasil yang diharapkan:
 
 ---
 
-## Langkah 3 — Hubungkan ke Jaringan Docker 9Router
+## Langkah 3 — Hubungkan ke Jaringan 9Router
+
+Langkah ini **tergantung cara deploy** di Langkah 1:
+
+### Jika pakai Docker (Opsi A)
 
 Agar 9Router bisa berkomunikasi dengan proxy, keduanya harus berada di **jaringan Docker yang sama**.
 
-### Cek nama jaringan 9Router:
+Cek nama jaringan 9Router:
 
 ```bash
 docker network ls
@@ -117,13 +121,13 @@ docker network ls
 
 Cari jaringan 9Router (biasanya `9router-net` atau `9router_default`).
 
-### Sambungkan proxy ke jaringan tersebut:
+#### Opsi 1 — Sambungkan container proxy yang sudah jalan:
 
 ```bash
 docker network connect 9router-net agentrouter-proxy
 ```
 
-### Atau gunakan `docker-compose.override.yml` (otomatis tergabung dengan `docker-compose.yml`):
+#### Opsi 2 — Atur jaringan sebelum start pakai `docker-compose.override.yml`:
 
 ```bash
 cp docker-compose.override.yml.example docker-compose.override.yml
@@ -143,13 +147,23 @@ networks:
     name: 9router-net        # ganti dengan nama jaringan 9Router kamu
 ```
 
-> Cek nama jaringan 9Router dengan `docker network ls`.
-
 Lalu restart:
 
 ```bash
 docker compose up -d
 ```
+
+---
+
+### Jika pakai Node.js langsung (Opsi B)
+
+9Router dan proxy sama-sama di host — **tidak perlu setup jaringan**. Cukup pastikan 9Router mengarah ke:
+
+```
+Base URL: http://localhost:8318/v1
+```
+
+Karena keduanya di host yang sama, sudah bisa komunikasi via `localhost`.
 
 ---
 
