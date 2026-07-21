@@ -74,16 +74,43 @@ docker compose up -d --build
 
 ### Opsi B — Node.js Langsung (Tanpa Docker)
 
+> **Rekomendasi:** Gunakan **PM2** sebagai process manager — proxy otomatis restart jika crash atau server reboot.
+
+#### 1. Install PM2 (sekali saja)
+
+```bash
+npm install -g pm2
+```
+
+#### 2. Clone dan jalankan proxy
+
 ```bash
 git clone https://github.com/trefeon/agentrouter-spoof-proxy.git
 cd agentrouter-spoof-proxy
 cp .env.example .env
-node proxy.mjs
+pm2 start proxy.mjs --name agentrouter-proxy
+pm2 save
 ```
 
-> **Windows (PowerShell):** Ganti `cp` dengan `copy`. Untuk `cd` sama saja.
->
-> Jalankan di terminal CMD/PowerShell agar tetap hidup. Di Windows tidak perlu tmux/screen.
+> **Windows (PowerShell):** Ganti `cp` dengan `copy`.
+
+#### 3. (Opsional) Auto-start saat reboot
+
+```bash
+pm2 startup
+```
+
+Ikuti instruksi yang muncul di terminal.
+
+#### Perintah PM2 sehari-hari
+
+| Perintah | Fungsi |
+|----------|--------|
+| `pm2 status` | Cek status proxy |
+| `pm2 logs agentrouter-proxy` | Lihat log real-time |
+| `pm2 restart agentrouter-proxy` | Restart proxy |
+| `pm2 stop agentrouter-proxy` | Stop proxy |
+| `pm2 delete agentrouter-proxy` | Hapus dari PM2 |
 
 ---
 
