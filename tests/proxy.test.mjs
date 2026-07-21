@@ -365,6 +365,27 @@ describe("agentrouter-spoof-proxy", () => {
     });
   });
 
+  // ── Concurrent parallel streams ──
+  describe("concurrent parallel streams", () => {
+    it("handles 3 parallel SSE streams without leaks", { timeout: 5000 }, async () => {
+      mock.setScenario("success");
+      const results = await Promise.all(
+        Array.from({ length: 3 }, () =>
+          collectSse(fetchStream(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+            method: "POST",
+            headers: proxyHeaders(),
+            body: chatBody(),
+          }))
+        )
+      );
+      results.forEach(({ events }) => {
+        assert.ok(events.some((e) => e.includes("message_stop")), "each stream should complete");
+      });
+      const after = await waitActiveStreams(proxyPort, 0);
+      assert.equal(after, 0, "no streams leaked after 3 concurrent streams");
+    });
+  });
+
   // ── Error handling ──
   describe("error handling", () => {
     it("returns 502 on upstream connection error", async () => {
@@ -513,36 +534,25 @@ describe("agentrouter-spoof-proxy", () => {
     });
   });
 
-  // ── Concurrent parallel streams ──
-  describe("concurrent parallel streams", () => {
-    it("handles 3 parallel SSE streams without leaks", { timeout: 5000 }, async () => {
-      mock.setScenario("success");
-      const results = await Promise.all(
-        Array.from({ length: 3 }, () =>
-          collectSse(fetchStream(`http://127.0.0.1:${proxyPort}/v1/messages`, {
-            method: "POST",
-            headers: proxyHeaders(),
-            body: chatBody(),
-          }))
-        )
-      );
-      results.forEach(({ events }) => {
-        assert.ok(events.some((e) => e.includes("message_stop")), "each stream should complete");
-      });
-      const after = await waitActiveStreams(proxyPort, 0);
-      assert.equal(after, 0, "no streams leaked after 3 concurrent streams");
-    });
-  });
-
   // ── Circuit breaker ──
   describe("circuit breaker", () => {
     it("opens after consecutive failures and blocks requests", async () => {
       mock.setScenario("connection_error");
-      const h1 = await fetch(`http://127.0.0.1:${proxyPort}/health`);
-      const initiallyOpen = JSON.parse(h1.body).circuitOpen;
 
-      // Send 5+ requests that will fail (connection errors)
-      for (let i = 0; i < 6; i++) {
+      // Get current circuit state
+      let h1;
+      for (let retry = 0; retry < 5; retry++) {
+        try {
+          h1 = await fetch(`http://127.0.0.1:${proxyPort}/health`);
+          JSON.parse(h1.body);
+          break;
+        } catch { await sleep(100); }
+      }
+      const priorFails = JSON.parse(h1.body).consecutiveFails;
+
+      // Send enough failures to reach 5 consecutive
+      const needed = Math.max(0, 6 - priorFails);
+      for (let i = 0; i < needed; i++) {
         await fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {
           method: "POST",
           headers: proxyHeaders(),
@@ -553,18 +563,14 @@ describe("agentrouter-spoof-proxy", () => {
       await sleep(300);
       const h2 = await fetch(`http://127.0.0.1:${proxyPort}/health`);
       const body = JSON.parse(h2.body);
-      // Circuit might be open or not depending on exact count
-      // It opens after 5 consecutive failures with MAX_RETRIES=1 → 5 fail + 1 fail = circuit opens
-      console.log(`  circuitOpen: ${body.circuitOpen}, consecutiveFails: ${body.consecutiveFails}`);
-      if (body.circuitOpen) {
-        // If circuit is open, a new request should get 503
-        const res = await fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {
-          method: "POST",
-          headers: proxyHeaders(),
-          body: chatBody(),
-        });
-        assert.equal(res.statusCode, 503);
-      }
+      assert.equal(body.circuitOpen, true, "circuit should be open after 5+ failures");
+
+      const res = await fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+        method: "POST",
+        headers: proxyHeaders(),
+        body: chatBody(),
+      });
+      assert.equal(res.statusCode, 503, "open circuit should return 503");
     });
   });
 

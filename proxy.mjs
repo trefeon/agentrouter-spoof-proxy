@@ -542,12 +542,6 @@ const server = http.createServer((req, res) => {
       currentUpstreamReq.destroy();
     }
   });
-  res.on("close", () => {
-    if (proxyDone) return;
-    if (!res.writableFinished && currentUpstreamReq && !currentUpstreamReq.destroyed) {
-      currentUpstreamReq.destroy();
-    }
-  });
 });
 
 server.headersTimeout = 30000;
