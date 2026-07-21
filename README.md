@@ -14,13 +14,25 @@ Lightweight Node.js reverse proxy that bypasses AgentRouter WAF by spoofing Clau
 curl -fsSL https://raw.githubusercontent.com/trefeon/agentrouter-spoof-proxy/main/scripts/install.sh | bash
 ```
 
+Non-interactive Docker install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/trefeon/agentrouter-spoof-proxy/main/scripts/install.sh | bash -s -- --yes --docker
+```
+
+Dry-run without changing the system:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/trefeon/agentrouter-spoof-proxy/main/scripts/install.sh | bash -s -- --dry-run --docker
+```
+
 ### Windows — One command (PowerShell as Admin)
 
 ```powershell
 iwr -useb https://raw.githubusercontent.com/trefeon/agentrouter-spoof-proxy/main/scripts/install.ps1 | iex
 ```
 
-Both scripts auto-detect your setup and guide you through Docker, PM2, or direct Node.js.
+Both scripts auto-detect your setup and guide you through Docker, PM2, or direct Node.js. Linux can install missing dependencies through supported package managers when you pass `--yes`; Windows can attempt Node.js install through `winget` and opens Docker Desktop installation if needed.
 
 ---
 
