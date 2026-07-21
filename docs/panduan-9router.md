@@ -55,6 +55,8 @@ Dengan menaruh proxy ini di **belakang 9Router**, kamu bisa:
 | 9Router | Sudah terinstall dan berjalan |
 | API Key | Dari akun agentrouter.org |
 
+> **Linux / Windows:** Tutorial ini support kedua platform. Bagian yang berbeda akan ditandai dengan catatan khusus.
+
 ---
 
 ## Langkah 1 — Deploy AgentRouter Spoof Proxy
@@ -68,6 +70,8 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+> **Windows (PowerShell):** Ganti `cp` dengan `copy` atau `Copy-Item .env.example .env`.
+
 ### Opsi B — Node.js Langsung (Tanpa Docker)
 
 ```bash
@@ -77,7 +81,9 @@ cp .env.example .env
 node proxy.mjs
 ```
 
-> Jalankan di terminal/screen/tmux agar tetap hidup.
+> **Windows (PowerShell):** Ganti `cp` dengan `copy`. Untuk `cd` sama saja.
+>
+> Jalankan di terminal CMD/PowerShell agar tetap hidup. Di Windows tidak perlu tmux/screen.
 
 ---
 
@@ -88,6 +94,8 @@ Tunggu beberapa detik sampai WAF warmup selesai, lalu cek:
 ```bash
 curl http://localhost:8318/health
 ```
+
+> **Windows (PowerShell):** Pakai `curl.exe http://localhost:8318/health` (bukan `curl` karena di PowerShell `curl` adalah alias untuk `Invoke-WebRequest`). Alternatif: `iwr http://localhost:8318/health`.
 
 Hasil yang diharapkan:
 
@@ -165,6 +173,8 @@ Base URL: http://localhost:8318/v1
 
 Karena keduanya di host yang sama, sudah bisa komunikasi via `localhost`.
 
+> **Catatan Windows:** Jika 9Router jalan di Docker (Docker Desktop) dan proxy jalan langsung di Windows, akses proxy dari 9Router pakai `http://host.docker.internal:8318/v1`, bukan `localhost`. Ini karena container Docker di Windows/Mac tidak bisa akses `localhost` host secara langsung — `host.docker.internal` adalah DNS khusus yang resolve ke IP host.
+
 ---
 
 ## Langkah 4 — Konfigurasi 9Router
@@ -188,6 +198,8 @@ Isi form dengan:
 | **Base URL** | `http://localhost:8318/v1` |
 
 > **Catatan:** Base URL pakai `localhost:8318` karena proxy berjalan di host yang sama. Jika proxy di server lain, ganti `localhost` dengan IP server proxy.
+>
+> **Windows (Docker Desktop):** Jika proxy jalan langsung di Windows dan 9Router di Docker, pakai `http://host.docker.internal:8318/v1` sebagai Base URL.
 
 ### 4.3 — Import Model dari /models
 
