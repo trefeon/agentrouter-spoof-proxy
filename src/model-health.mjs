@@ -34,6 +34,13 @@ export function markModelFailed(modelId, statusCode) {
   }
 }
 
+export function markModelExhausted(modelId) {
+  if (!modelId) return;
+  failedUntil.set(modelId, Date.now() + 120000);
+  const ts = new Date().toISOString();
+  log(ts, `MODEL EXHAUSTED (429): ${modelId} — locked for 120s`);
+}
+
 function clearModelLock(modelId) {
   failedUntil.delete(modelId);
   failCounts.delete(modelId);
