@@ -1,7 +1,7 @@
 {
   "name": "agentrouter-spoof-proxy",
   "version": "1.0.0",
-  "description": "Lightweight Node.js reverse proxy that bypasses AgentRouter WAF by spoofing Claude Code headers. Zero dependencies, ~600 lines orchestration + 8 small modules, 120MB Docker image.",
+  "description": "Lightweight Node.js reverse proxy that spoofs Claude Code headers to bypass the AgentRouter WAF. Zero runtime dependencies, thin <150-line entry + 13 focused modules, 120MB Docker image.",
   "private": true,
   "type": "module",
   "engines": {
