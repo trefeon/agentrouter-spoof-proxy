@@ -18,7 +18,7 @@ const {
   SSE_CHUNK_TIMEOUT_MS = "30000",
   RESPONSE_TIMEOUT_MS = "30000",
   LOG_LEVEL = "info",
-  SLOW_RESPONSE_MS = "15000",
+  SLOW_RESPONSE_MS = "30000",
 } = process.env;
 
 export const PORT = parseInt(LISTEN_PORT, 10);

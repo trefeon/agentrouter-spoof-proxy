@@ -106,7 +106,7 @@ All values have defaults — copy `.env.example` to `.env` only if you need to c
 | `MAX_RETRIES` | `2` | Retry count |
 | `AR_API_KEY` | _(empty)_ | Enable dynamic model discovery |
 | `INJECT_SYSTEM_PROMPT` | _(empty)_ | System prompt injected into requests |
-| `SLOW_RESPONSE_MS` | `15000` | Temporarily degrades models with slow successful streams |
+| `SLOW_RESPONSE_MS` | `30000` | Temporarily degrades models with slow successful streams |
 | `LOG_LEVEL` | `info` | `info` or `debug` |
 
 See `.env.example` for the full list (14 variables).
