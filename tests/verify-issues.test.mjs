@@ -87,7 +87,7 @@ async function collectSse(request, timeoutMs = 5000) {
   });
 }
 
-function proxyHeaders(method = "POST") {
+function proxyHeaders() {
   return {
     "content-type": "application/json",
     authorization: "Bearer sk_test",

@@ -3,8 +3,8 @@ import { log } from "../logger.mjs";
 
 const PROBE_INTERVAL = 60000;     // recovery probe every 60s
 const PROBE_TIMEOUT = 8000;       // probe deadline
-const BASE_COOLDOWN = 30000;      // 30s first offence
-const MAX_COOLDOWN = 600000;      // 10min max lock
+const EXHAUST_LOCK_MS = 120000;   // 429 rate-limit lock
+const DEGRADE_LOCK_MS = 60000;    // degraded (slow/empty/sse-timeout) lock
 
 const failedUntil = new Map();    // model_id → timestamp
 const failCounts = new Map();     // model_id → consecutive failure count
@@ -36,16 +36,16 @@ export function markModelFailed(modelId, statusCode) {
 
 export function markModelExhausted(modelId) {
   if (!modelId) return;
-  failedUntil.set(modelId, Date.now() + 120000);
+  failedUntil.set(modelId, Date.now() + EXHAUST_LOCK_MS);
   const ts = new Date().toISOString();
-  log(ts, `MODEL EXHAUSTED (429): ${modelId} — locked for 120s`);
+  log(ts, `MODEL EXHAUSTED (429): ${modelId} — locked for ${EXHAUST_LOCK_MS / 1000}s`);
 }
 
 export function markModelDegraded(modelId, reason = "degraded") {
   if (!modelId) return;
-  failedUntil.set(modelId, Date.now() + 60000);
+  failedUntil.set(modelId, Date.now() + DEGRADE_LOCK_MS);
   const ts = new Date().toISOString();
-  log(ts, `MODEL DEGRADED: ${modelId} (${reason}) — locked for 60s`);
+  log(ts, `MODEL DEGRADED: ${modelId} (${reason}) — locked for ${DEGRADE_LOCK_MS / 1000}s`);
 }
 
 function clearModelLock(modelId) {

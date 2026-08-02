@@ -1,9 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  SSE_EOM, KEEPALIVE_THRESHOLD, MAX_BODY_SIZE,
   truncate, filterHeaders, rewritePath,
-  isWafBlock, isRetryable, injectPrompt, summarizeRequest, responseHasEmptyOutput, redactSensitive,
+  isWafBlock, isRetryable, getRetryDelay, getResponseTimeout, injectPrompt, summarizeRequest, responseHasEmptyOutput, redactSensitive,
   normalizeSetCookie,
 } from "../../src/utils.mjs";
 import { extractWafCookies } from "../../src/auth/waf.mjs";
@@ -88,6 +87,37 @@ describe("unit: isRetryable", () => {
   it("ETIMEDOUT is retryable", () => assert.equal(isRetryable(null, "ETIMEDOUT"), true));
   it("no status no message is retryable", () => assert.equal(isRetryable(null, null), true));
   it("known error with no status is retryable", () => assert.equal(isRetryable(null, "ENETUNREACH"), true));
+});
+
+describe("unit: getRetryDelay", () => {
+  it("exponential backoff from base", () => {
+    assert.equal(getRetryDelay(0, 1000), 1000);
+    assert.equal(getRetryDelay(1, 1000), 2000);
+    assert.equal(getRetryDelay(2, 1000), 4000);
+    assert.equal(getRetryDelay(3, 1000), 8000);
+  });
+  it("respects custom base", () => {
+    assert.equal(getRetryDelay(2, 500), 2000);
+  });
+});
+
+describe("unit: getResponseTimeout", () => {
+  const dflt = 30000;
+  it("default for small payloads", () => {
+    assert.equal(getResponseTimeout(100 * 1024, dflt), dflt);
+  });
+  it("90s for 500KB-1MB", () => {
+    assert.equal(getResponseTimeout(600 * 1024, dflt), 90000);
+  });
+  it("2min for 1-2MB", () => {
+    assert.equal(getResponseTimeout(1.5 * 1024 * 1024, dflt), 120000);
+  });
+  it("3min for 2-5MB", () => {
+    assert.equal(getResponseTimeout(3 * 1024 * 1024, dflt), 180000);
+  });
+  it("5min for >5MB", () => {
+    assert.equal(getResponseTimeout(10 * 1024 * 1024, dflt), 300000);
+  });
 });
 
 describe("unit: extractWafCookies", () => {

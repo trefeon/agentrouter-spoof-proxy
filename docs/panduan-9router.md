@@ -132,7 +132,7 @@ Hasil yang diharapkan:
   "wafCookie": true,
   "circuitOpen": false,
   "modelSource": "static",
-  "availableModels": 5
+  "availableModels": 3
 }
 ```
 
@@ -235,11 +235,9 @@ Isi form dengan:
 3. 9Router akan memanggil `http://localhost:8318/v1/models` dan otomatis mengambil daftar model
 
 Model yang akan muncul:
-- `claude-opus-4-6`
-- `claude-opus-4-7`
+- `gpt-5.6-sol`
+- `claude-opus-5`
 - `claude-opus-4-8`
-- `glm-5.2`
-- `gpt-5.5`
 
 Jika mengaktifkan **Model Auto-Discovery** (dengan `AR_API_KEY`), model yang tampil akan sesuai dengan akun agentrouter.org kamu.
 
@@ -339,11 +337,9 @@ Masukkan API key 9Router (bukan API key agentrouter).
 
 | Model ID (di 9Router) | Provider | Context | Output | Harga Input/Output per MTok |
 |-----------------------|----------|---------|--------|----------------------------|
+| `AG-gpt-5.6-sol` | [OpenAI](https://developers.openai.com/api/docs/models/gpt-5.6-sol) | 1.05M | 128K | $5 / $30 |
+| `AG-claude-opus-5` | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) | 1M | 128K | $5 / $25 |
 | `AG-claude-opus-4-8` | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) | 1M | 128K | $5 / $25 |
-| `AG-claude-opus-4-7` | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) | 1M | 128K | $5 / $25 |
-| `AG-claude-opus-4-6` | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) | 1M | 128K | $5 / $25 |
-| `AG-gpt-5.5` | [OpenAI](https://developers.openai.com/docs/models/gpt-5.5) | 1.05M | 128K | $5 / $30 |
-| `AG-glm-5.2` | [ZhipuAI](https://docs.bigmodel.cn/cn/guide/start/model-overview) | 1M | 128K | ~$0.84 / ~$2.63 |
 
 ---
 

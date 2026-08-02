@@ -12,7 +12,7 @@ services:
       - TARGET_HOST=${TARGET_HOST:-agentrouter.org}
       - TARGET_PORT=${TARGET_PORT:-443}
       - REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS:-300000}
-      - MODELS_CSV=${MODELS_CSV:-claude-opus-4-6,claude-opus-4-7,claude-opus-4-8,glm-5.2,gpt-5.5}
+      - MODELS_CSV=${MODELS_CSV:-gpt-5.6-sol,claude-opus-5,claude-opus-4-8}
       - WARMUP_INTERVAL_MS=${WARMUP_INTERVAL_MS:-180000}
       - MAX_RETRIES=${MAX_RETRIES:-2}
       - RETRY_DELAY_MS=${RETRY_DELAY_MS:-1000}

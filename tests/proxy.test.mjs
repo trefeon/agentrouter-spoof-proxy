@@ -99,7 +99,7 @@ async function collectSse(request, timeoutMs = 5000) {
   });
 }
 
-function proxyHeaders(method = "POST") {
+function proxyHeaders() {
   return {
     "content-type": "application/json",
     authorization: "Bearer sk_test",
@@ -352,7 +352,7 @@ describe("agentrouter-spoof-proxy", () => {
       mock.setScenario("waf_405");
       mock.received.length = 0;
 
-      const { events } = await collectSse(fetchStream(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+      await collectSse(fetchStream(`http://127.0.0.1:${proxyPort}/v1/messages`, {
         method: "POST",
         headers: proxyHeaders(),
         body: chatBody(),

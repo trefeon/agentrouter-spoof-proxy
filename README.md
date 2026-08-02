@@ -1,6 +1,6 @@
 # AgentRouter Spoof Proxy
 
-Lightweight Node.js reverse proxy that bypasses AgentRouter WAF by spoofing Claude Code headers. Zero dependencies, ~600 lines orchestration + 8 small modules, 120MB Docker image.
+Lightweight Node.js reverse proxy that bypasses AgentRouter WAF by spoofing Claude Code headers. Zero runtime dependencies — <150-line thin entry + 13 focused modules, 120MB Docker image.
 
 > 🇮🇩 **[Panduan 9Router Bahasa Indonesia](docs/panduan-9router.md)** — Tutorial lengkap untuk teman-teman Indonesia.
 
@@ -43,7 +43,7 @@ curl http://localhost:8318/health
 ```
 
 ```json
-{"ok":true,"upstream":"agentrouter.org:443","availableModels":5,"activeStreams":0,"wafCookie":true,"circuitOpen":false}
+{"ok":true,"upstream":"agentrouter.org:443","availableModels":3,"activeStreams":0,"wafCookie":true,"circuitOpen":false}
 ```
 
 Wait 5 seconds if `wafCookie: false` — WAF warmup runs at startup.
@@ -60,7 +60,7 @@ Wait 5 seconds if `wafCookie: false` — WAF warmup runs at startup.
    - **Base URL:** `http://localhost:8318/v1` (or `http://172.18.0.3:8318/v1` if Docker-to-Docker)
 3. Click **Import from /models**
 4. **Add API Key** → paste your AgentRouter API key (simpan di 9Router aja, bukan di proxy)
-5. Model will appear as `AG-claude-opus-4-8`, `AG-glm-5.2`, etc.
+5. Model will appear as `AG-gpt-5.6-sol`, `AG-claude-opus-5`, etc.
 
 > Windows Docker Desktop: use `http://host.docker.internal:8318/v1`
 
@@ -117,11 +117,9 @@ See `.env.example` for the full list (14 variables).
 
 | Model | Context | Max output | Input/Output per MTok | Provider |
 |-------|---------|------------|----------------------|----------|
+| `gpt-5.6-sol` | 1.05M | 128K | $5 / $30 | [OpenAI](https://developers.openai.com/api/docs/models/gpt-5.6-sol) |
+| `claude-opus-5` | 1M | 128K | $5 / $25 | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) |
 | `claude-opus-4-8` | 1M | 128K | $5 / $25 | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) |
-| `claude-opus-4-7` | 1M | 128K | $5 / $25 | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) |
-| `claude-opus-4-6` | 1M | 128K | $5 / $25 | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) |
-| `gpt-5.5` | 1.05M | 128K | $5 / $30 | [OpenAI](https://developers.openai.com/docs/models/gpt-5.5) |
-| `glm-5.2` | 1M | 128K | ~$0.84 / ~$2.63 | [ZhipuAI](https://docs.bigmodel.cn/cn/guide/start/model-overview) |
 
 ---
 
@@ -136,16 +134,20 @@ Client → 9Router → agentrouter-proxy:8318 → agentrouter.org (upstream)
 ```
 
 ```
-proxy.mjs (~600 lines, orchestration)
-├── src/config.mjs              — env + constants + agent pool
-├── src/logger.mjs              — logging
-├── src/utils.mjs               — pure functions (path, headers, injection, etc.)
-├── src/auth/spoof.mjs          — Claude Code header spoofing
-├── src/auth/waf.mjs            — WAF cookie warmup
-├── src/models/discovery.mjs    — static/dynamic model discovery
-├── src/models/health.mjs       — auto-detect failing models, recovery probe
-├── src/models/stats.mjs        — model success metrics
-└── src/resilience/circuit-breaker.mjs — circuit breaker state
+proxy.mjs (~140 lines, thin entry: routing + lifecycle)
+├── src/config.mjs                     — env + constants + agent pool
+├── src/logger.mjs                     — logging
+├── src/utils.mjs                      — pure functions (path, headers, retry, adaptive timeout)
+├── src/errors.mjs                     — buildError + isOurError marker
+├── src/status-code.mjs                — error code → HTTP status mapping
+├── src/auth/spoof.mjs                 — Claude Code header spoofing
+├── src/auth/waf.mjs                   — WAF cookie warmup
+├── src/models/discovery.mjs           — static/dynamic model discovery
+├── src/models/health.mjs              — auto-detect failing models, recovery probe
+├── src/models/stats.mjs               — model success metrics
+├── src/resilience/circuit-breaker.mjs — circuit breaker state
+├── src/proxy/handler.mjs              — request handler (buffering, telemetry, retry loop)
+└── src/proxy/stream.mjs               — SSE streaming pump (keepalive, timeouts, backpressure)
 ```
 
 ---
@@ -153,12 +155,35 @@ proxy.mjs (~600 lines, orchestration)
 ## Running Tests
 
 ```bash
-# Fast unit tests — pure functions, no network (51 tests, <500ms)
-node --test tests/unit/utils.test.mjs
+# Everything (72 unit + 29 E2E)
+npm test
 
-# E2E tests — spawns proxy + mock upstream (30 tests, ~12s)
-node --test tests/proxy.test.mjs
+# Fast unit tests — pure functions + SSE pump, no network (72 tests via node:test)
+npm run test:unit
+
+# E2E tests — spawns proxy + mock upstream (29 tests, ~65s)
+npm run test:e2e
+
+# Lint + syntax gate
+npm run lint
+npm run check
+
+# Zero-dep coverage (node built-in)
+npm run coverage
 ```
+
+## Local Debugging
+
+| Symptom | Command |
+|---------|---------|
+| Hang / who holds the socket | `NODE_DEBUG=http,net,stream,tls node proxy.mjs` |
+| Stack of warnings (listener leaks) | `node --trace-warnings --stack-trace-limit=50 proxy.mjs` |
+| Verbose proxy logs | `LOG_LEVEL=debug node proxy.mjs` |
+| Attach debugger | `node --inspect proxy.mjs` → Chrome `chrome://inspect` |
+| Diagnostic report on demand | `node --report-on-signal proxy.mjs` then `kill -USR2` → JSON report |
+| Stuck shutdown (open handles) | `node --test --test-force-exit tests/proxy.test.mjs` |
+
+Zero runtime dependencies — everything above is built-in Node (or `oxlint` as dev-only).
 
 ---
 

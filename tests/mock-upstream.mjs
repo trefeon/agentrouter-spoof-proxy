@@ -69,7 +69,7 @@ export class MockUpstream {
     res.end("not found");
   }
 
-  _get(req, res, body) {
+  _get(req, res, _body) {
     res.writeHead(200, {
       "content-type": "text/html",
       "set-cookie": ["acw_tc=test_mock_cookie; Path=/; Secure"],
@@ -77,7 +77,7 @@ export class MockUpstream {
     res.end("<html><body>mock ok</body></html>");
   }
 
-  async _chat(req, res, body) {
+  async _chat(req, res, _body) {
     switch (this._scenario) {
       case "success":
         this._sse(res, () => { for (const c of SSE_CHUNKS) res.write(c); });

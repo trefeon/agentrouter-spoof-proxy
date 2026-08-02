@@ -92,6 +92,20 @@ export function isRetryable(statusCode, errorMessage) {
   return false;
 }
 
+export function getRetryDelay(attempt, baseMs) {
+  return baseMs * Math.pow(2, attempt);
+}
+
+// Adaptive response timeout — larger bodies need more upstream processing time.
+export function getResponseTimeout(bodyBytes, defaultMs) {
+  const mb = bodyBytes / (1024 * 1024);
+  if (mb > 5) return 300000;     // 5min for >5MB
+  if (mb > 2) return 180000;     // 3min for 2-5MB
+  if (mb > 1) return 120000;     // 2min for 1-2MB
+  if (mb > 0.5) return 90000;    // 90s for 500KB-1MB
+  return defaultMs;              // default 30s for small payloads
+}
+
 export function injectPrompt(rawBody, path, prompt) {
   if (!prompt || !rawBody.length) return rawBody;
   try {

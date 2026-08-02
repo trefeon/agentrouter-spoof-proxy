@@ -59,9 +59,13 @@ Expected: `"ok":true,"wafCookie":true`
 
 | File | Purpose |
 |------|---------|
-| `proxy.mjs` | Main orchestration (core module) |
+| `proxy.mjs` | Thin entry: routing, schedulers, lifecycle (~140 lines) |
+| `src/proxy/handler.mjs` | Request handler: buffering, telemetry, retry loop (invariant flags documented) |
+| `src/proxy/stream.mjs` | SSE streaming pump: keepalive, idle/chunk timeouts, backpressure, EOM injection |
+| `src/errors.mjs` | `buildError(msg, code)` + `isOurError` marker |
+| `src/status-code.mjs` | Error code → HTTP status mapping (pure) |
 | `src/config.mjs` | Env config + agent pool |
-| `src/utils.mjs` | Pure functions (path, headers, injection) |
+| `src/utils.mjs` | Pure functions (path, headers, retry, adaptive timeout) |
 | `src/logger.mjs` | Logging |
 | `src/auth/spoof.mjs` | Claude Code header spoofing |
 | `src/auth/waf.mjs` | WAF cookie warmup |
@@ -69,8 +73,11 @@ Expected: `"ok":true,"wafCookie":true`
 | `src/models/health.mjs` | Auto-detect failing models |
 | `src/models/stats.mjs` | Model success metrics |
 | `src/resilience/circuit-breaker.mjs` | Circuit breaker |
-| `tests/unit/utils.test.mjs` | 51 unit tests (<500ms) |
-| `tests/proxy.test.mjs` | 30 E2E tests |
+| `tests/unit/utils.test.mjs` | Unit tests: pure functions |
+| `tests/unit/errors.test.mjs` | Unit tests: errors + status mapping |
+| `tests/unit/stream.test.mjs` | Unit tests: SSE pump (real sockets, 10 tests) |
+| `tests/proxy.test.mjs` | 29 E2E tests |
+| `package.json` | Scripts: `test`, `test:unit`, `test:e2e`, `coverage`, `lint`, `check` (oxlint devDep only) |
 | `docs/panduan-9router.md` | 🇮🇩 Panduan Bahasa Indonesia |
 
 ---
