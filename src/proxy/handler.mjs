@@ -21,7 +21,7 @@ import { SPOOF_HEADERS } from "../auth/spoof.mjs";
 import { markModelFailed, markModelExhausted, markModelDegraded } from "../models/health.mjs";
 import { recordModelStart, recordModelResult } from "../models/stats.mjs";
 import {
-  SSE_EOM, MAX_BODY_SIZE,
+  MAX_BODY_SIZE, eomTail,
   truncate, filterHeaders, rewritePath, respondJson,
   isWafBlock, isRetryable, getRetryDelay, getResponseTimeout, injectPrompt, summarizeRequest, responseHasEmptyOutput, redactSensitive,
 } from "../utils.mjs";
@@ -35,6 +35,7 @@ export function handleProxyRequest(req, res, streams) {
   const body = [];
   let bodySize = 0;
   let bodyRejected = false;
+  let uploadTimer = null;
   let currentUpstreamReq = null;
   let proxyDone = false;
   let hasEnded = false;
@@ -61,20 +62,69 @@ export function handleProxyRequest(req, res, streams) {
     try { respondJson(res, status, data); } catch (e) { log(ts, `safeRespondJson error: ${e.message}`); }
   }
 
+  // Oversized body: send one clean 413, then drain the remaining upload without
+  // buffering it (the socket closes after a short grace deadline). Never forward
+  // the oversized body upstream and never reset the client before the 413.
+  function rejectOversized() {
+    rejectOversizedWithStatus(413, "payload_too_large", "Request body exceeds 20MB limit");
+  }
+
+  // Client stopped uploading: bounded body-upload deadline so a stalled/slow
+  // upload cannot hold a socket open indefinitely.
+  function startUploadTimer() {
+    uploadTimer = setTimeout(() => {
+      if (hasEnded || bodyRejected) return;
+      log(ts, `${method} ${rawPath} -> REJECTED 408 (body upload timed out after ${cfg.BODY_UPLOAD_TIMEOUT / 1000}s)`);
+      rejectOversizedWithStatus(408, "request_timeout", "Request body upload timed out");
+    }, cfg.BODY_UPLOAD_TIMEOUT);
+    uploadTimer.unref();
+  }
+
+  function rejectOversizedWithStatus(status, code, message) {
+    if (bodyRejected || res.headersSent || res.writableEnded) return;
+    bodyRejected = true;
+    if (uploadTimer) { clearTimeout(uploadTimer); uploadTimer = null; }
+    log(ts, `${method} ${rawPath} -> REJECTED ${status} (${code})`);
+    respondJson(res, status, { error: { code, message, type: "proxy_error" } });
+    // Drain the remaining upload (never buffer, never forward) so the client
+    // can finish reading the rejection over a live connection — destroying the
+    // socket here would deliver ECONNRESET instead of the 413. A short grace
+    // deadline still bounds a never-ending upload.
+    req.removeAllListeners("data");
+    req.removeAllListeners("end");
+    req.on("data", () => {});
+    const drainDeadline = setTimeout(() => {
+      if (req.socket && !req.socket.destroyed) req.socket.destroy();
+    }, 5000);
+    drainDeadline.unref();
+  }
+
+  // Early Content-Length check: reject before buffering any bytes.
+  const contentLength = Number(req.headers["content-length"]);
+  if (Number.isFinite(contentLength) && contentLength > MAX_BODY_SIZE) {
+    rejectOversized();
+    return;
+  }
+
+  startUploadTimer();
+
   req.on("data", (c) => {
+    if (bodyRejected) return;
     bodySize += c.length;
-    if (bodySize > MAX_BODY_SIZE && !bodyRejected) {
-      bodyRejected = true;
-      req.destroy();
-      respondJson(res, 413, { error: { code: "payload_too_large", message: "Request body exceeds 20MB limit", type: "proxy_error" } });
+    if (bodySize > MAX_BODY_SIZE) {
+      rejectOversized();
       return;
     }
-    if (!bodyRejected) body.push(c);
+    body.push(c);
   });
 
   req.on("end", () => {
     hasEnded = true;
+    if (uploadTimer) { clearTimeout(uploadTimer); uploadTimer = null; }
     const path = rewritePath(rawPath);
+    // Anthropic and OpenAI streams use different terminal events; the stream
+    // pump and the partial-response EOM path must inject the right one.
+    const streamFormat = path.startsWith("/v1/chat/completions") ? "openai" : "anthropic";
     const fullBody = Buffer.concat(body);
     const requestSummary = summarizeRequest(fullBody, path, method);
     logDebug(ts, `${method} ${rawPath} -> REQUEST ${JSON.stringify(requestSummary)}`);
@@ -190,7 +240,19 @@ export function handleProxyRequest(req, res, streams) {
 
           if (statusCode >= 500) markModelFailed(requestModel, statusCode);
 
-          recordSuccess();
+          // Circuit accounting for a *final* upstream response.
+          //   5xx  → provider-side outage: count toward opening the circuit.
+          //   429  → per-model rate limit, upstream is healthy and reachable.
+          //          The model is locked out above (markModelExhausted) so the
+          //          client falls back; the global circuit is left untouched so
+          //          one throttled model cannot black out every other model.
+          //   4xx  → caller's fault, not an outage: neither fails nor resets.
+          //   2xx/3xx → genuine success: reset the consecutive failure run.
+          if (statusCode >= 500) {
+            recordFailure();
+          } else if (statusCode < 400) {
+            recordSuccess();
+          }
 
           const filteredHeaders = filterHeaders(upstreamRes.headers);
           isSse = (upstreamRes.headers["content-type"] || "").includes("text/event-stream");
@@ -253,7 +315,7 @@ export function handleProxyRequest(req, res, streams) {
           logDebug(ts, `${method} ${rawPath} <- TTFB ${Date.now() - reqStart}ms, status 200, SSE=${isSse}`);
 
           pipeSse({
-            upstreamRes, upstreamReq, res, isSse,
+            upstreamRes, upstreamReq, res, isSse, streamFormat,
             chunkTimeoutMs: cfg.SSE_CHUNK_TIMEOUT,
             idleTimeoutMs: cfg.SSE_IDLE,
             slowResponseMs: cfg.SLOW_RESPONSE_MS_INT,
@@ -268,13 +330,18 @@ export function handleProxyRequest(req, res, streams) {
 
         currentUpstreamReq = upstreamReq;
 
-        // Response timeout: adaptive based on body size
+        // Response timeout: adaptive based on body size.
+        // Must drive the retry/error path directly — destroying the upstream
+        // request with an error would be swallowed by the `error` listener
+        // (errorHandled is already set), leaving the client without a response
+        // and streams.count permanently incremented.
         responseTimer = setTimeout(() => {
           if (upstreamResponded) return;
           if (errorHandled) return;
           errorHandled = true;
           clearIdleTimer();
-          if (!upstreamReq.destroyed) upstreamReq.destroy(buildError("upstream response timeout", E_TIMEOUT));
+          if (!upstreamReq.destroyed) upstreamReq.destroy();
+          handleError(buildError("upstream response timeout", E_TIMEOUT));
         }, adaptiveResponseTimeout);
         responseTimer.unref();
 
@@ -300,7 +367,7 @@ export function handleProxyRequest(req, res, streams) {
             recordFailure();
             log(ts, `${method} ${rawPath} -> STREAM ERROR after partial response: ${e.message}`);
             recordModelResult(requestModel, { statusCode: 502, error: e.message });
-            if (isSse && !sawMessageStop) { try { res.write(`\n${SSE_EOM}\ndata: {}\n\n`); } catch {} }
+            if (isSse && !sawMessageStop) { try { res.write(eomTail(streamFormat)); } catch {} }
             try { res.end(); } catch {}
             finishProxy();
             resolveProxy();
@@ -355,6 +422,7 @@ export function handleProxyRequest(req, res, streams) {
   });
 
   req.on("close", () => {
+    if (uploadTimer) { clearTimeout(uploadTimer); uploadTimer = null; }
     if (proxyDone) return;
     const shouldAbort = !hasEnded || req.socket?.destroyed;
     if (shouldAbort && currentUpstreamReq && !currentUpstreamReq.destroyed) {
@@ -362,6 +430,7 @@ export function handleProxyRequest(req, res, streams) {
     }
   });
   req.on("error", () => {
+    if (uploadTimer) { clearTimeout(uploadTimer); uploadTimer = null; }
     if (proxyDone) return;
     if (currentUpstreamReq && !currentUpstreamReq.destroyed) {
       currentUpstreamReq.destroy();

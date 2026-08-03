@@ -4,7 +4,7 @@ import http from "node:http";
 import { PassThrough } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pipeSse } from "../../src/proxy/stream.mjs";
-import { SSE_EOM } from "../../src/utils.mjs";
+import { SSE_EOM, SSE_DONE } from "../../src/utils.mjs";
 
 const EOM_TAIL = `\n${SSE_EOM}\ndata: {}\n\n`;
 
@@ -76,25 +76,28 @@ describe("unit: pipeSse", () => {
     assert.equal(h.events.finished, 1);
   });
 
-  it("chunk timeout after real data records 504 sse_chunk_timeout", async () => {
-    const h = makeHarness({ chunkTimeoutMs: 150 });
+  it("chunk timeout on a live stream extends instead of cutting", async () => {
+    const h = makeHarness({ chunkTimeoutMs: 150, idleTimeoutMs: 3000 });
     h.upstreamRes.write("x".repeat(100));
-    await sleep(300);
-    assert.equal(h.events.results[0].statusCode, 504);
-    assert.equal(h.events.results[0].error, "sse_chunk_timeout");
-    assert.deepStrictEqual(h.events.degrades, ["sse_chunk_timeout"]);
-    assert.equal(h.upstreamReq.destroyed, true);
-    assert.equal(h.body.endsWith(EOM_TAIL), true);
+    await sleep(400); // exceed the stall window; stream is still alive
+    assert.equal(h.upstreamReq.destroyed, false, "live stream must not be destroyed");
+    assert.equal(h.events.finished, 0, "live stream must not be finished/cut");
+
+    // Still receives data afterward and completes normally.
+    h.upstreamRes.write("more".repeat(50));
+    h.upstreamRes.end();
+    await sleep(30);
+    assert.equal(h.events.results[0].statusCode, 200);
+    assert.equal(h.events.finished, 1);
   });
 
-  it("keepalive-only stream records 504 keepalive_only", async () => {
-    const h = makeHarness({ chunkTimeoutMs: 150, idleTimeoutMs: 5000 });
+  it("keepalive-only live stream extends instead of cutting", async () => {
+    const h = makeHarness({ chunkTimeoutMs: 150, idleTimeoutMs: 3000 });
     h.upstreamRes.write(":\n\n");
     h.upstreamRes.write(":\n\n");
-    await sleep(350);
-    assert.equal(h.events.results[0].statusCode, 504);
-    assert.equal(h.events.results[0].error, "keepalive_only");
-    assert.deepStrictEqual(h.events.degrades, ["keepalive_only"]);
+    await sleep(400);
+    assert.equal(h.upstreamReq.destroyed, false, "comment-only live stream must not be destroyed");
+    assert.equal(h.events.finished, 0, "comment-only live stream must not be cut");
   });
 
   it("empty SSE stream (pings only) degrades empty_sse on normal end", async () => {
@@ -168,5 +171,90 @@ describe("unit: pipeSse", () => {
     await sleep(20);
     assert.equal(h.body.includes(SSE_EOM), false);
     assert.equal(h.events.finished, 1);
+  });
+
+  it("keepalives continue after real data and stop after finish", async () => {
+    const h = makeHarness({ keepaliveIntervalMs: 60 });
+    const comments = () => (h.body.match(/:\n\n/g) || []).length;
+
+    h.upstreamRes.write(`event: message_start\ndata: ${"y".repeat(200)}\n\n`);
+    await sleep(160);
+    const afterData = comments();
+    assert.ok(afterData >= 1, "a keepalive comment should arrive after the first data chunk");
+
+    // Keepalives must keep flowing even after more real data (the old bug
+    // cleared the keepalive interval on the first data event).
+    h.upstreamRes.write(`event: content_block_delta\ndata: ${"z".repeat(200)}\n\n`);
+    await sleep(150);
+    assert.ok(comments() > afterData, "keepalives must continue after further data");
+
+    h.upstreamRes.end();
+    const atEnd = comments();
+    await sleep(150);
+    assert.equal(comments(), atEnd, "keepalives must stop after the stream finishes");
+
+    assert.equal(h.events.finished, 1);
+  });
+
+  it("recognizes a short message_stop frame (<50 bytes) as terminal", async () => {
+    const h = makeHarness();
+    // 37 bytes — well under any size threshold, proving size is not used.
+    h.upstreamRes.write(`event: message_stop\ndata: {}\n\n`);
+    await sleep(10);
+    h.upstreamRes.destroy();
+    await sleep(20);
+    assert.equal(h.events.messageStops, 1, "short message_stop must be recognized");
+    assert.equal(h.body.endsWith(EOM_TAIL), false, "no EOM injected after message_stop seen");
+    assert.equal(h.events.finished, 1);
+  });
+
+  it("detects message_stop split across chunks exactly once", async () => {
+    const h = makeHarness();
+    h.upstreamRes.write("event: message_");
+    await sleep(5);
+    h.upstreamRes.write(`stop\ndata: {}\n`);
+    await sleep(5);
+    h.upstreamRes.write("\n");
+    await sleep(10);
+    h.upstreamRes.destroy();
+    await sleep(20);
+    assert.equal(h.events.messageStops, 1, "split marker must be detected exactly once");
+    assert.equal(h.body.endsWith(EOM_TAIL), false, "no EOM after split message_stop");
+    assert.equal(h.events.finished, 1);
+  });
+
+  it("OpenAI format: [DONE] is recognized and no Anthropic EOM is injected", async () => {
+    const h = makeHarness({ streamFormat: "openai" });
+    h.upstreamRes.write(`data: {"id":"chatcmpl-abc","choices":[]}\n\n`);
+    await sleep(10);
+    h.upstreamRes.write(`${SSE_DONE}\n\n`);
+    await sleep(10);
+    h.upstreamRes.destroy();
+    await sleep(20);
+    assert.equal(h.events.messageStops, 1, "[DONE] must mark the stream terminal");
+    assert.equal(h.body.includes("event: message_stop"), false, "OpenAI stream must never get Anthropic EOM");
+    assert.equal(h.events.finished, 1);
+  });
+
+  it("OpenAI format: premature close injects data: [DONE] EOM", async () => {
+    const h = makeHarness({ streamFormat: "openai" });
+    h.upstreamRes.write(`data: {"content":"partial answer..."}\n\n`);
+    await sleep(10);
+    h.upstreamRes.destroy();
+    await sleep(20);
+    assert.equal(h.body.endsWith(`\ndata: [DONE]\n\n`), true, "OpenAI premature close injects [DONE]");
+    assert.equal(h.body.includes("event: message_stop"), false, "must not inject Anthropic event");
+    assert.equal(h.events.results[0].statusCode, 502);
+  });
+
+  it("comment-only frames count as noise, not model data", async () => {
+    const h = makeHarness();
+    h.upstreamRes.write(": keep-alive\n\n");
+    h.upstreamRes.write(": ping\n\n");
+    h.upstreamRes.end();
+    await sleep(20);
+    assert.deepStrictEqual(h.events.degrades, ["empty_sse"], "comment-only stream is empty");
+    assert.equal(h.events.results[0].emptyOutput, true);
+    assert.equal(h.events.messageStops, 0);
   });
 });

@@ -1,3 +1,5 @@
+import { timingSafeEqual } from "node:crypto";
+
 export const HOP_BY_HOP = new Set([
   "transfer-encoding", "connection", "keep-alive",
   "proxy-authenticate", "proxy-authorization",
@@ -5,8 +7,17 @@ export const HOP_BY_HOP = new Set([
 ]);
 
 export const SSE_EOM = "event: message_stop";
-export const KEEPALIVE_THRESHOLD = 50;
+export const SSE_DONE = "data: [DONE]";
 export const MAX_BODY_SIZE = 20 * 1024 * 1024;
+
+// Terminal SSE event for the active stream format. Anthropic `messages` streams
+// end with `event: message_stop\ndata: {}`; OpenAI `chat.completions` streams
+// end with `data: [DONE]`. Injecting the wrong one corrupts the client's
+// parser (e.g. openai-node throws `Expected 'id' to be a string` when it reads
+// the Anthropic `data: {}` frame as a chat-completion chunk).
+export function eomTail(streamFormat = "anthropic") {
+  return streamFormat === "openai" ? `\ndata: [DONE]\n\n` : `\n${SSE_EOM}\ndata: {}\n\n`;
+}
 
 // ── Pure functions ──
 
@@ -69,6 +80,24 @@ export function rewritePath(path) {
   if (path === "/v1/messages" || path.startsWith("/v1/messages?")) return path;
   if (path === "/v1/chat/completions" || path.startsWith("/v1/chat/completions?")) return path;
   return path;
+}
+
+// Proxy allowlist: only these API paths may be forwarded upstream. Everything
+// else (including any undocumented path) is answered locally with a 404.
+const PROXY_ROUTES = new Set(["/v1/messages", "/messages", "/v1/chat/completions"]);
+
+export function isProxyRoute(rawPath) {
+  const base = String(rawPath || "").split("?")[0];
+  return PROXY_ROUTES.has(base);
+}
+
+// Constant-time comparison for the inbound proxy token so a naive timing
+// attack cannot recover the secret by length-prefixed probing.
+export function safeTokenEqual(a, b) {
+  const x = Buffer.from(String(a ?? ""));
+  const y = Buffer.from(String(b ?? ""));
+  if (x.length !== y.length) return false;
+  return timingSafeEqual(x, y);
 }
 
 export function respondJson(res, status, data) {

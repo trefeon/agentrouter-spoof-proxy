@@ -1,6 +1,6 @@
 # AgentRouter Spoof Proxy
 
-Lightweight Node.js reverse proxy that bypasses AgentRouter WAF by spoofing Claude Code headers. Zero runtime dependencies — <150-line thin entry + 13 focused modules, 120MB Docker image.
+Lightweight Node.js reverse proxy that bypasses AgentRouter WAF by spoofing Claude Code headers. Zero runtime dependencies — thin modular entry + 13 focused modules, 120MB Docker image.
 
 > 🇮🇩 **[Panduan 9Router Bahasa Indonesia](docs/panduan-9router.md)** — Tutorial lengkap untuk teman-teman Indonesia.
 
@@ -71,13 +71,15 @@ Wait 5 seconds if `wafCookie: false` — WAF warmup runs at startup.
 | Feature | How |
 |---------|-----|
 | **WAF bypass** | Spoofs Claude Code CLI headers + maintains `acw_tc` cookies |
-| **SSE streaming** | Pipes with backpressure, keepalive pings, idle/chunk timeouts |
+| **SSE streaming** | Pipes with backpressure + keepalives; format-aware EOM; never cuts live streams |
 | **Retry logic** | Auto-retry on 5xx/timeout/ECONNRESET with exponential backoff |
-| **Circuit breaker** | Opens after 5 consecutive failures, progressive cooldown |
+| **Circuit breaker** | Opens after 5 consecutive final 5xx/transport failures, progressive cooldown |
 | **Auto model health** | Failing models removed from `/v1/models` → 9Router falls back instantly |
 | **Model recovery** | Background probe every 60s with spoof headers + WAF cookie |
 | **Prompt injection** | Optional system prompt injection (`INJECT_SYSTEM_PROMPT`) |
 | **Model discovery** | Optional dynamic model list via `AR_API_KEY` |
+| **Bounded bodies** | 20MB limit → clean `413`; stalled uploads → `408` |
+| **Narrow proxy surface** | Only 3 API routes proxied; localhost bind by default; optional token auth |
 | **Graceful shutdown** | Drains active streams, destroys agent pool |
 
 ---
@@ -86,11 +88,18 @@ Wait 5 seconds if `wafCookie: false` — WAF warmup runs at startup.
 
 | Path | Method | Description |
 |------|--------|-------------|
-| `/health` | GET | Status, WAF cookie, circuit breaker, streams |
-| `/v1/models` | GET | Available models (unhealthy ones auto-filtered) |
+| `/health`, `/api/health` | GET | Status, WAF cookie, circuit breaker, streams (no auth required) |
+| `/v1/models`, `/models` | GET | Available models (unhealthy ones auto-filtered) |
 | `/v1/messages` | POST | Anthropic Messages API → proxied |
 | `/messages` | POST | Auto-rewritten to `/v1/messages` |
 | `/v1/chat/completions` | POST | OpenAI Chat Completions → proxied |
+
+Only the three proxy routes above are ever forwarded upstream. Unknown paths
+return a local `404`, unsupported methods return a local `405`, and — when
+`PROXY_AUTH_TOKEN` is set — missing/invalid credentials return `401` before any
+upstream work. SSE terminal events are format-aware: Anthropic streams end with
+`event: message_stop`, OpenAI `chat.completions` streams end with `data: [DONE]`,
+and long-lived streams are never cut while the upstream connection is alive.
 
 ---
 
@@ -101,15 +110,21 @@ All values have defaults — copy `.env.example` to `.env` only if you need to c
 | Variable | Default | What it does |
 |----------|---------|-------------|
 | `LISTEN_PORT` | `8318` | Proxy port |
+| `LISTEN_ADDRESS` | `127.0.0.1` | Bind address. Set `0.0.0.0` only for Docker-to-Docker/remote (with `PROXY_AUTH_TOKEN`) |
+| `PROXY_AUTH_TOKEN` | _(empty)_ | Optional inbound auth — required header `Authorization: Bearer` or `X-Proxy-Token` |
 | `TARGET_HOST` | `agentrouter.org` | Upstream host |
 | `REQUEST_TIMEOUT_MS` | `300000` | Request timeout (5min) |
+| `RESPONSE_TIMEOUT_MS` | `30000` | Wait for upstream response headers before 504/retry |
+| `SSE_IDLE_TIMEOUT_MS` | `600000` | Terminate stream after no SSE events (dead upstream) |
+| `SSE_CHUNK_TIMEOUT_MS` | `30000` | Stall watchdog — reports slow streams, keeps alive while connected |
+| `BODY_UPLOAD_TIMEOUT_MS` | `60000` | Reject stalled uploads with 408 |
 | `MAX_RETRIES` | `2` | Retry count |
 | `AR_API_KEY` | _(empty)_ | Enable dynamic model discovery |
 | `INJECT_SYSTEM_PROMPT` | _(empty)_ | System prompt injected into requests |
 | `SLOW_RESPONSE_MS` | `30000` | Temporarily degrades models with slow successful streams |
 | `LOG_LEVEL` | `info` | `info` or `debug` |
 
-See `.env.example` for the full list (14 variables).
+See `.env.example` for the full list.
 
 ---
 
@@ -134,7 +149,7 @@ Client → 9Router → agentrouter-proxy:8318 → agentrouter.org (upstream)
 ```
 
 ```
-proxy.mjs (~140 lines, thin entry: routing + lifecycle)
+proxy.mjs (~166 lines, thin entry: routing allowlist + inbound auth + lifecycle)
 ├── src/config.mjs                     — env + constants + agent pool
 ├── src/logger.mjs                     — logging
 ├── src/utils.mjs                      — pure functions (path, headers, retry, adaptive timeout)
@@ -157,20 +172,23 @@ proxy.mjs (~140 lines, thin entry: routing + lifecycle)
 > Runtime is zero-dependency. The scripts below use `oxlint` + the built-in `node:test` runner; run `npm install` once (devDependencies only) to use them.
 
 ```bash
-# Everything (72 unit + 29 E2E)
+# Everything (97 unit + 51 E2E + 7 issue-verification = 155 tests, exits cleanly)
 npm test
 
-# Fast unit tests — pure functions + SSE pump, no network (72 tests via node:test)
+# Fast unit tests — pure functions + SSE pump, no long-lived processes (97 tests)
 npm run test:unit
 
-# E2E tests — spawns proxy + mock upstream (29 tests, ~65s)
+# E2E tests — spawns proxy + mock upstream (51 tests, ~25s)
 npm run test:e2e
+
+# Issue-verification regression tests (7 tests)
+npm run test:verify
 
 # Lint + syntax gate
 npm run lint
 npm run check
 
-# Zero-dep coverage (node built-in)
+# Zero-dep coverage (node built-in) — config, resilience, stats, stream, utils, models
 npm run coverage
 ```
 
@@ -183,7 +201,7 @@ npm run coverage
 | Verbose proxy logs | `LOG_LEVEL=debug node proxy.mjs` |
 | Attach debugger | `node --inspect proxy.mjs` → Chrome `chrome://inspect` |
 | Diagnostic report on demand | `node --report-on-signal proxy.mjs` then `kill -USR2` → JSON report |
-| Stuck shutdown (open handles) | `node --test --test-force-exit tests/proxy.test.mjs` |
+| Stuck shutdown (diagnostic only) | `node --test --test-force-exit tests/proxy.test.mjs` |
 
 Zero runtime dependencies — everything above is built-in Node (or `oxlint` as dev-only).
 
@@ -194,8 +212,17 @@ Zero runtime dependencies — everything above is built-in Node (or `oxlint` as 
 **Q: Kenapa Claude model kadang error 500?**
 A: Bukan bug proxy. Upstream agentrouter.org kadang Go panic buat Claude models. Proxy punya **auto model health** — model error langsung dihapus dari `/v1/models` dan 9Router otomatis fallback ke model lain. Recovery probe tiap 60 detik. Progressive cooldown: 30s → 1m → 2m → 5m → 10m.
 
+**Q: Streaming sering putus / kena cut di tengah jawaban?**
+A: Sejak hardening, proxy tidak pernah motong stream yang masih hidup — kalau upstream masih nyambung, stall watchdog cuma di-reset (aman untuk thinking panjang / tool use). Stream hanya berakhir kalau: upstream selesai, error, client disconnect, atau benar-benar idle (tidak ada event sama sekali) melebihi `SSE_IDLE_TIMEOUT_MS` (default 10 menit). Kalau masih kepotong, cek log proxy untuk `SLOW STREAM` / `IDLE TIMEOUT` dan sesuaikan `SSE_CHUNK_TIMEOUT_MS` / `SSE_IDLE_TIMEOUT_MS`.
+
+**Q: OpenAI / chat completions dapat error "Expected 'id' to be a string"?**
+A: Sudah diperbaiki. Terminal event sekarang format-aware: stream `/v1/chat/completions` diakhiri `data: [DONE]`, bukan `event: message_stop` dari format Anthropic.
+
+**Q: Request body gede banget (>20MB)?**
+A: Ditolak bersih dengan HTTP `413 payload_too_large` — body-nya gak pernah diteruskan ke upstream. Upload yang macet juga diputus dengan `408` setelah `BODY_UPLOAD_TIMEOUT_MS`.
+
 **Q: API key disimpen dimana?**
-A: **Di 9Router aja**, bukan di proxy. Proxy cuma spoof header, ga nyimpen credential.
+A: **Di 9Router aja**, bukan di proxy. Proxy cuma spoof header, ga nyimpen credential. Kalau proxy di-expose (bukan localhost), set `PROXY_AUTH_TOKEN` dan isi di 9Router sebagai Bearer token.
 
 **Q: WAF cookie expired?**
 A: Proxy refresh otomatis tiap 3 menit via warmup. Kalau kena 403 WAF mid-request, auto re-warmup & retry.

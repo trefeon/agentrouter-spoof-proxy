@@ -5,6 +5,12 @@
 #
 # Example: join an existing Docker network (e.g. 9Router's network)
 # so the proxy is reachable by container name from other services.
+# The proxy already listens on 0.0.0.0 inside the container, so once it is on
+# the same network, 9Router can use http://agentrouter-proxy:8318/v1.
+#
+# SECURITY: on a shared Docker network the proxy is reachable by any container
+# on it. Set PROXY_AUTH_TOKEN in your .env (see docker-compose.yml) and pass it
+# in 9Router as the provider's API key / bearer token.
 
 services:
   agentrouter-proxy:

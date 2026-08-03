@@ -9,6 +9,10 @@ services:
         required: false
     environment:
       - LISTEN_PORT=${LISTEN_PORT:-8318}
+      # Docker-to-Docker exposure: the container must listen on all interfaces
+      # so 9Router (on the same network) can reach it by container name/IP.
+      # Host mode uses the secure default 127.0.0.1 unless overridden.
+      - LISTEN_ADDRESS=0.0.0.0
       - TARGET_HOST=${TARGET_HOST:-agentrouter.org}
       - TARGET_PORT=${TARGET_PORT:-443}
       - REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS:-300000}
@@ -22,8 +26,12 @@ services:
       - SSE_IDLE_TIMEOUT_MS=${SSE_IDLE_TIMEOUT_MS:-600000}
       - SSE_CHUNK_TIMEOUT_MS=${SSE_CHUNK_TIMEOUT_MS:-30000}
       - RESPONSE_TIMEOUT_MS=${RESPONSE_TIMEOUT_MS:-30000}
+      - BODY_UPLOAD_TIMEOUT_MS=${BODY_UPLOAD_TIMEOUT_MS:-60000}
       - SLOW_RESPONSE_MS=${SLOW_RESPONSE_MS:-30000}
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      # Optional inbound auth token. Recommended whenever the proxy is exposed
+      # beyond localhost or the private Docker network.
+      - PROXY_AUTH_TOKEN=${PROXY_AUTH_TOKEN:-}
     sysctls:
       - net.ipv4.tcp_keepalive_time=60
       - net.ipv4.tcp_keepalive_intvl=10

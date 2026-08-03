@@ -343,16 +343,37 @@ Masukkan API key 9Router (bukan API key agentrouter).
 
 ---
 
+## Keamanan Deployment
+
+Versi terbaru proxy punya batasan permukaan yang lebih aman:
+
+- **Bind address default `127.0.0.1`** — di host, proxy cuma bisa diakses dari lokal. Untuk akses Docker-to-Docker atau remote, set `LISTEN_ADDRESS=0.0.0.0` di `.env`.
+- **Hanya rutinitas API yang di-proxy** — `/v1/messages`, `/messages`, `/v1/chat/completions`. Path lain dikembalikan `404` lokal, method selain POST dikembalikan `405`. Tidak ada path yang bocor ke upstream.
+- **Auth opsional** — jika set `PROXY_AUTH_TOKEN`, setiap request proxied wajib membawa token via `Authorization: Bearer <token>` atau `X-Proxy-Token: <token>`, dibandingkan constant-time, dan **tidak pernah di-log**. `/health` dan `/v1/models` tetap terbuka (tanpa secret) supaya probe Docker/9Router jalan.
+- **Disarankan:** kalau proxy di-expose di jaringan bersama atau internet, selalu set `PROXY_AUTH_TOKEN` dan isi sebagai Bearer token di 9Router.
+
+Contoh `.env` untuk akses remote yang aman:
+
+```env
+LISTEN_ADDRESS=0.0.0.0
+PROXY_AUTH_TOKEN=GANTI_DENGAN_TOKEN_RAHASIA_PANJANG
+```
+
+---
+
 ## Catatan Penting
 
 | Masalah | Penyebab | Solusi |
 |---------|----------|--------|
 | `wafCookie: false` | Proxy gagal warmup | Cek koneksi ke `agentrouter.org`, tunggu beberapa detik |
-| `circuitOpen: true` | 5+ gagal berurutan | Tunggu backoff, cek ketersediaan agentrouter.org |
+| `circuitOpen: true` | 5+ gagal berurutan (transport / 5xx final) | Tunggu backoff, cek ketersediaan agentrouter.org |
 | `NoChannelError` (503) | Tidak ada channel untuk model itu | Coba model lain atau retry |
 | 403 pada request | WAF block atau kuota habis | WAF: di-retry otomatis. Kuota: ganti model |
-| 502/504 | Timeout dari upstream | Cek jaringan, naikkan `REQUEST_TIMEOUT_MS` |
-| 429 | Rate limit TPM | Tunggu dan retry |
+| 502/504 | Timeout dari upstream | Cek jaringan, naikkan `REQUEST_TIMEOUT_MS` / `RESPONSE_TIMEOUT_MS` |
+| 429 | Rate limit TPM | Tunggu dan retry (model di-lock sementara, global pindah ke model lain) |
+| Streaming kepotong di tengah | Dulu bukan bug proxy | Sekarang tidak mungkin dipotong selama koneksi upstream masih hidup; kalau tetap, cek log `SLOW STREAM`/`IDLE TIMEOUT` |
+| 413 | Body request > 20MB | Kurangi ukuran body; body tidak pernah diteruskan ke upstream |
+| 408 | Upload body macet | Client berhenti upload; batas `BODY_UPLOAD_TIMEOUT_MS` |
 
 ---
 

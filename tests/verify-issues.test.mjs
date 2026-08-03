@@ -57,6 +57,19 @@ async function waitForProxy(port, timeoutMs = 10000) {
   throw new Error(`proxy did not become healthy within ${timeoutMs}ms`);
 }
 
+// Graceful, awaited proxy shutdown so the suite exits without --test-force-exit.
+async function stopProxy(proc, timeoutMs = 8000) {
+  if (!proc || proc.exitCode !== null) return;
+  const exited = new Promise((resolve) => proc.once("exit", resolve));
+  proc.kill("SIGTERM");
+  await Promise.race([
+    exited,
+    sleep(timeoutMs).then(() => {
+      if (proc.exitCode === null) proc.kill("SIGKILL");
+    }),
+  ]);
+}
+
 async function collectSse(request, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     const events = [];
@@ -153,9 +166,9 @@ describe("issue-2: Content-Length forwarding with INJECT_SYSTEM_PROMPT", () => {
     await waitForProxy(proxyPort);
   });
 
-  after(() => {
-    if (proxyProc && !proxyProc.killed) proxyProc.kill("SIGTERM");
-    mock.close();
+  after(async () => {
+    await stopProxy(proxyProc);
+    await mock.close();
   });
 
   it("content-length from client is NOT forwarded to upstream (Node auto-computes)", async () => {
@@ -249,9 +262,9 @@ describe("issue-3: request body size limit", () => {
     await waitForProxy(proxyPort);
   });
 
-  after(() => {
-    if (proxyProc && !proxyProc.killed) proxyProc.kill("SIGTERM");
-    mock.close();
+  after(async () => {
+    await stopProxy(proxyProc);
+    await mock.close();
   });
 
   it("proxy handles 1MB request body without crashing", async () => {

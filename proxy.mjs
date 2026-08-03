@@ -8,8 +8,17 @@ import { SPOOF_HEADERS } from "./src/auth/spoof.mjs";
 import { getModelsList, getModelSource, fetchModels } from "./src/models/discovery.mjs";
 import { getHealthyModels, startProbeLoop, stopProbeLoop } from "./src/models/health.mjs";
 import { getModelStats } from "./src/models/stats.mjs";
-import { respondJson } from "./src/utils.mjs";
+import { respondJson, isProxyRoute, safeTokenEqual } from "./src/utils.mjs";
 import { handleProxyRequest } from "./src/proxy/handler.mjs";
+
+// Fail fast on invalid environment values (bad port, NaN timeouts, bad
+// protocol) before the server or any scheduler starts.
+try {
+  cfg.validateConfig();
+} catch (e) {
+  console.error(`[${new Date().toISOString()}] ${e.message}`);
+  process.exit(1);
+}
 
 // ── Shared state ──
 
@@ -47,11 +56,27 @@ function scheduleDiscovery() {
 
 // ── Server ──
 
+function requireProxyAuth(req) {
+  if (!cfg.PROXY_AUTH_TOKEN_VAL) return true;
+  const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
+  const candidates = [req.headers["x-proxy-token"], bearer && bearer[1]];
+  return candidates.some((v) => typeof v === "string" && safeTokenEqual(v, cfg.PROXY_AUTH_TOKEN_VAL));
+}
+
+// Local rejection (404/401/405/etc.): answer immediately and then drain any
+// request body that is still arriving, so the keep-alive socket is left clean
+// for the next request instead of being corrupted into a 400 on reuse.
+function rejectLocally(req, res, status, code, message) {
+  respondJson(res, status, { error: { code, message, type: "proxy_error" } });
+  if (req.readable && !req.readableEnded) req.resume();
+}
+
 const server = http.createServer((req, res) => {
   const rawPath = req.url;
   const method = req.method;
 
-  // Health check
+  // Local health/model endpoints stay open: they carry no secrets, and health
+  // probes from Docker/9Router must work regardless of the auth configuration.
   if (method === "GET" && (rawPath === "/health" || rawPath === "/api/health")) {
     respondJson(res, 200, {
       ok: true,
@@ -74,6 +99,28 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Everything else is the proxy surface: only the documented API routes may
+  // be forwarded upstream. Unknown paths never reach the upstream.
+  if (!isProxyRoute(rawPath)) {
+    rejectLocally(req, res, 404, "not_found", `Route ${rawPath} not found`);
+    return;
+  }
+
+  // Inbound proxy authentication (optional). When PROXY_AUTH_TOKEN is set, the
+  // client must present it via `Authorization: Bearer <token>` or
+  // `X-Proxy-Token: <token>`. Missing/invalid credentials are rejected before
+  // any upstream work happens.
+  if (!requireProxyAuth(req)) {
+    rejectLocally(req, res, 401, "unauthorized", "Invalid or missing proxy auth token");
+    return;
+  }
+
+  // API routes are POST-only; other methods get a deterministic local answer.
+  if (method !== "POST") {
+    rejectLocally(req, res, 405, "method_not_allowed", `Method ${method} not allowed on ${rawPath}`);
+    return;
+  }
+
   handleProxyRequest(req, res, streams);
 });
 
@@ -82,8 +129,8 @@ server.requestTimeout = 0;
 
 // ── Start & Shutdown ──
 
-server.listen(cfg.PORT, "0.0.0.0", async () => {
-  console.log(`AgentRouter proxy listening on port ${cfg.PORT}, target=${cfg.TARGET_HOST_VAL}:${cfg.TARGET_PORT_INT}`);
+server.listen(cfg.PORT, cfg.LISTEN_ADDRESS_VAL, async () => {
+  console.log(`AgentRouter proxy listening on ${cfg.LISTEN_ADDRESS_VAL}:${cfg.PORT}, target=${cfg.TARGET_HOST_VAL}:${cfg.TARGET_PORT_INT}`);
   await resolveDns();
   scheduleWarmup();
   scheduleDiscovery();

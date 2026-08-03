@@ -9,6 +9,27 @@ const SSE_CHUNKS = [
   `event: message_stop\ndata: {}\n\n`,
 ];
 
+// Anthropic interleaved-thinking stream: thinking block first, then text.
+const THINKING_CHUNKS = [
+  `event: message_start\ndata: {"type":"message_start","message":{"id":"msg_think","content":[],"model":"claude-opus-4-8","role":"assistant","stop_reason":null,"stop_sequence":null,"type":"message","usage":{"input_tokens":10,"output_tokens":1}}}\n\n`,
+  `event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"block_type":"thinking","thinking":""}}\n\n`,
+  `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me reason through this carefully."}}\n\n`,
+  `event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n`,
+  `event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"block_type":"text","text":""}}\n\n`,
+  `event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Here is the final answer."}}\n\n`,
+  `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}\n\n`,
+  `event: message_stop\ndata: {}\n\n`,
+];
+
+// OpenAI chat.completions streaming format.
+const OPENAI_CHUNKS = [
+  `data: {"id":"chatcmpl-9router-test","object":"chat.completion.chunk","created":0,"model":"gpt-5.6-sol","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n`,
+  `data: {"id":"chatcmpl-9router-test","object":"chat.completion.chunk","created":0,"model":"gpt-5.6-sol","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}\n\n`,
+  `data: {"id":"chatcmpl-9router-test","object":"chat.completion.chunk","created":0,"model":"gpt-5.6-sol","choices":[{"index":0,"delta":{"content":" from OpenAI"},"finish_reason":null}]}\n\n`,
+  `data: {"id":"chatcmpl-9router-test","object":"chat.completion.chunk","created":0,"model":"gpt-5.6-sol","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n`,
+  `data: [DONE]\n\n`,
+];
+
 export class MockUpstream {
   constructor() {
     this._scenario = "success";
@@ -83,6 +104,14 @@ export class MockUpstream {
         this._sse(res, () => { for (const c of SSE_CHUNKS) res.write(c); });
         break;
 
+      case "thinking_stream":
+        this._sse(res, () => { for (const c of THINKING_CHUNKS) res.write(c); });
+        break;
+
+      case "openai_stream":
+        this._sse(res, () => { for (const c of OPENAI_CHUNKS) res.write(c); });
+        break;
+
       case "success_streaming":
         this._sse(res, async () => {
           for (const c of SSE_CHUNKS) { res.write(c); await sleep(10); }
@@ -107,6 +136,16 @@ export class MockUpstream {
         res.end(JSON.stringify({ error: { message: "internal error" } }));
         break;
 
+      case "error_400":
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "invalid request" } }));
+        break;
+
+      case "error_429":
+        res.writeHead(429, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "rate limited" } }));
+        break;
+
       case "error_502":
         res.writeHead(502, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { message: "bad gateway" } }));
@@ -118,6 +157,12 @@ export class MockUpstream {
         break;
 
       case "timeout":
+        await sleep(60000);
+        break;
+
+      // Accepts the request but never sends response headers. Used to exercise
+      // the adaptive RESPONSE_TIMEOUT_MS path independently of REQUEST_TIMEOUT_MS.
+      case "no_response_headers":
         await sleep(60000);
         break;
 
