@@ -6,8 +6,30 @@ import {
   normalizeSetCookie,
 } from "../../src/utils.mjs";
 import { extractWafCookies } from "../../src/auth/waf.mjs";
+import { SPOOF_HEADERS, ANTHROPIC_SPOOF_HEADERS, GENERIC_SPOOF_HEADERS } from "../../src/auth/spoof.mjs";
 
 // ════════════════ TESTS ════════════════
+
+describe("unit: spoof headers", () => {
+  it("exports ANTHROPIC_SPOOF_HEADERS with anthropic headers", () => {
+    assert.equal(ANTHROPIC_SPOOF_HEADERS["Anthropic-Version"], "2023-06-01");
+    assert.ok("Anthropic-Beta" in ANTHROPIC_SPOOF_HEADERS);
+    assert.equal(ANTHROPIC_SPOOF_HEADERS["User-Agent"], undefined);
+  });
+
+  it("exports GENERIC_SPOOF_HEADERS with generic headers only", () => {
+    assert.equal(GENERIC_SPOOF_HEADERS["User-Agent"], "claude-cli/2.1.92 (external, sdk-cli)");
+    assert.equal(GENERIC_SPOOF_HEADERS["Anthropic-Version"], undefined);
+    assert.equal(GENERIC_SPOOF_HEADERS["Anthropic-Beta"], undefined);
+  });
+
+  it("exports combined SPOOF_HEADERS alias containing both", () => {
+    assert.deepStrictEqual(SPOOF_HEADERS, {
+      ...GENERIC_SPOOF_HEADERS,
+      ...ANTHROPIC_SPOOF_HEADERS,
+    });
+  });
+});
 
 describe("unit: rewritePath", () => {
   it("/messages -> /v1/messages", () => {
@@ -77,16 +99,19 @@ describe("unit: isWafBlock", () => {
 });
 
 describe("unit: isRetryable", () => {
-  it("500 is retryable", () => assert.equal(isRetryable(500, null), true));
-  it("503 is retryable", () => assert.equal(isRetryable(503, null), true));
-  it("200 is NOT retryable", () => assert.equal(isRetryable(200, null), false));
-  it("403 is NOT retryable", () => assert.equal(isRetryable(403, null), false));
-  it("socket hang up is retryable", () => assert.equal(isRetryable(null, "socket hang up"), true));
-  it("timeout is retryable", () => assert.equal(isRetryable(null, "timeout"), true));
-  it("ECONNRESET is retryable", () => assert.equal(isRetryable(null, "ECONNRESET"), true));
-  it("ETIMEDOUT is retryable", () => assert.equal(isRetryable(null, "ETIMEDOUT"), true));
-  it("no status no message is retryable", () => assert.equal(isRetryable(null, null), true));
-  it("known error with no status is retryable", () => assert.equal(isRetryable(null, "ENETUNREACH"), true));
+  it("500 is NOT retryable by default (retryOn5xx=false)", () => assert.equal(isRetryable(500, null), false));
+  it("500 is retryable when retryOn5xx=true", () => assert.equal(isRetryable(500, null, true), true));
+  it("503 is NOT retryable when retryOn5xx=false", () => assert.equal(isRetryable(503, null, false), false));
+  it("503 is retryable when retryOn5xx=true", () => assert.equal(isRetryable(503, null, true), true));
+  it("200 is NOT retryable even when retryOn5xx=true", () => assert.equal(isRetryable(200, null, true), false));
+  it("403 is NOT retryable even when retryOn5xx=true", () => assert.equal(isRetryable(403, null, true), false));
+  it("socket hang up is retryable regardless of retryOn5xx", () => assert.equal(isRetryable(null, "socket hang up", false), true));
+  it("timeout is retryable regardless of retryOn5xx", () => assert.equal(isRetryable(null, "timeout", false), true));
+  it("ECONNRESET is retryable regardless of retryOn5xx", () => assert.equal(isRetryable(null, "ECONNRESET", false), true));
+  it("ETIMEDOUT is retryable regardless of retryOn5xx", () => assert.equal(isRetryable(null, "ETIMEDOUT", false), true));
+  it("ENETUNREACH is retryable regardless of retryOn5xx", () => assert.equal(isRetryable(null, "ENETUNREACH", false), true));
+  it("no status no message is NOT retryable", () => assert.equal(isRetryable(null, null), false));
+  it("unknown error message is NOT retryable", () => assert.equal(isRetryable(null, "some random error", false), false));
 });
 
 describe("unit: getRetryDelay", () => {

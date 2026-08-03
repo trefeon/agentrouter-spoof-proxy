@@ -1,8 +1,63 @@
+# Dependencies
 node_modules/
+
+# Environment and secrets
 .env
+.env.local
+.env.*.local
+
+# Log files
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS metadata
 .DS_Store
+Thumbs.db
+
+# Docker local overrides
 docker-compose.override.yml
-docs/plans/
-docs/dev.md
+
+# Internal agent state & temporary directories
+.agents/
 .engram/
+.system_generated/
+scratch/
+
+# Internal agent / dev prompt, planning, handoff, briefing, and progress markdown files
+PLAN*.md
+plan*.md
+TASK*.md
+task*.md
+HANDOFF*.md
+handoff*.md
+ORIGINAL_REQUEST*.md
+PROJECT*.md
+TEST_INFRA*.md
+PROMPT*.md
+prompt*.md
+*_prompt.md
+*_findings.md
+*_notes.md
+BRIEFING*.md
+briefing*.md
+DISPATCH*.md
+dispatch*.md
+GATE_STATUS*.md
+SCOPE*.md
+scope*.md
+PROGRESS*.md
+progress*.md
+docs/dev.md
+docs/plans/
+
+# Test & coverage output
+coverage/
+.nyc_output/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo

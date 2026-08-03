@@ -272,6 +272,23 @@ describe("agentrouter-spoof-proxy", () => {
       assert.equal(req.headers.authorization, "Bearer sk_test");
     });
 
+    it("sends generic spoof headers to /v1/chat/completions without anthropic headers", async () => {
+      mock.setScenario("openai");
+      mock.received.length = 0;
+      await collectSse(fetchStream(`http://127.0.0.1:${proxyPort}/v1/chat/completions`, {
+        method: "POST",
+        headers: { ...proxyHeaders(), "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: "hi" }] }),
+      }));
+      const req = mock.received.find((r) => r.method === "POST" && r.url.startsWith("/v1/chat/completions"));
+      assert.ok(req, "upstream received POST for chat completions");
+      assert.ok(req.headers["user-agent"]?.includes("claude-cli"), "user-agent spoofed");
+      assert.ok(req.headers["x-stainless-runtime"], "x-stainless-runtime present");
+      assert.equal(req.headers["anthropic-version"], undefined, "anthropic-version must NOT be passed to OpenAI route");
+      assert.equal(req.headers["anthropic-beta"], undefined, "anthropic-beta must NOT be present on OpenAI route");
+      assert.equal(req.headers["anthropic-dangerous-direct-browser-access"], undefined, "anthropic dangerous header must NOT be present on OpenAI route");
+    });
+
     it("forwards WAF cookie to upstream", async () => {
       mock.setScenario("success");
       mock.received.length = 0;

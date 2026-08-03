@@ -257,4 +257,25 @@ describe("unit: pipeSse", () => {
     assert.equal(h.events.results[0].emptyOutput, true);
     assert.equal(h.events.messageStops, 0);
   });
+
+  it("parses and logs token usage from Anthropic and OpenAI data blocks", async () => {
+    const debugLogs = [];
+    const h = makeHarness({
+      logDebug: (msg) => debugLogs.push(msg),
+    });
+    // Anthropic message_start
+    h.upstreamRes.write(`event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":25,"output_tokens":5}}}\n\n`);
+    // Anthropic message_delta
+    h.upstreamRes.write(`event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":42}}\n\n`);
+    // OpenAI style chunk
+    h.upstreamRes.write(`data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50}}\n\n`);
+    // Malformed JSON (should be ignored gracefully)
+    h.upstreamRes.write(`data: {invalid json}\n\n`);
+    h.upstreamRes.end();
+    await sleep(20);
+
+    assert.equal(debugLogs.some((l) => l.includes("TOKEN USAGE: input_tokens=25, output_tokens=5")), true);
+    assert.equal(debugLogs.some((l) => l.includes("TOKEN USAGE: input_tokens=N/A, output_tokens=42")), true);
+    assert.equal(debugLogs.some((l) => l.includes("TOKEN USAGE: input_tokens=100, output_tokens=50")), true);
+  });
 });

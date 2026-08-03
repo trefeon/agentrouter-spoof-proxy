@@ -17,7 +17,7 @@ import { buildError, isOurError, E_TIMEOUT, E_CIRCUIT, E_UPSTREAM, E_INTERNAL } 
 import { codeToStatus } from "../status-code.mjs";
 import { isCircuitOpen, recordSuccess, recordFailure } from "../resilience/circuit-breaker.mjs";
 import { getWafCookie, warmup } from "../auth/waf.mjs";
-import { SPOOF_HEADERS } from "../auth/spoof.mjs";
+import { SPOOF_HEADERS, GENERIC_SPOOF_HEADERS } from "../auth/spoof.mjs";
 import { markModelFailed, markModelExhausted, markModelDegraded } from "../models/health.mjs";
 import { recordModelStart, recordModelResult } from "../models/stats.mjs";
 import {
@@ -126,6 +126,7 @@ export function handleProxyRequest(req, res, streams) {
     // pump and the partial-response EOM path must inject the right one.
     const streamFormat = path.startsWith("/v1/chat/completions") ? "openai" : "anthropic";
     const fullBody = Buffer.concat(body);
+    body.length = 0;
     const requestSummary = summarizeRequest(fullBody, path, method);
     logDebug(ts, `${method} ${rawPath} -> REQUEST ${JSON.stringify(requestSummary)}`);
 
@@ -137,12 +138,15 @@ export function handleProxyRequest(req, res, streams) {
     try { requestModel = JSON.parse(fullBody.toString("utf8"))?.model || null; } catch {}
     if (requestModel) recordModelStart(requestModel);
 
+    const isAnthropic = path.startsWith("/v1/messages");
+    const spoofHeaders = isAnthropic ? SPOOF_HEADERS : GENERIC_SPOOF_HEADERS;
+
     const upstreamHeaders = {
-      ...SPOOF_HEADERS,
+      ...spoofHeaders,
       "Content-Type": "application/json",
       ...(req.headers["authorization"] ? { Authorization: req.headers["authorization"] } : {}),
       ...(req.headers["x-api-key"] ? { "x-api-key": req.headers["x-api-key"] } : {}),
-      ...(req.headers["anthropic-version"] ? { "anthropic-version": req.headers["anthropic-version"] } : {}),
+      ...(isAnthropic && req.headers["anthropic-version"] ? { "anthropic-version": req.headers["anthropic-version"] } : {}),
     };
 
     const wafCookie = getWafCookie();
@@ -202,9 +206,10 @@ export function handleProxyRequest(req, res, streams) {
               if (isWafBlock(statusCode, raw)) {
                 log(ts, `WAF ${statusCode} detected, refreshing cookie and retrying...`);
                 await warmup();
-                recordModelResult(requestModel, { statusCode, durationMs: Date.now() - upstreamStart, wafBlock: true, error: "waf_block", emptyOutput });
                 const newCookie = getWafCookie();
                 if (newCookie) upstreamHeaders["Cookie"] = newCookie;
+                const delay = getRetryDelay(attempt, cfg.RETRY_DELAY);
+                await sleep(delay);
                 const result = await doRequest(attempt + 1);
                 resolveProxy(result);
                 return;
@@ -222,10 +227,9 @@ export function handleProxyRequest(req, res, streams) {
           }
 
           // 5xx retry — if exhausted, mark model unhealthy
-          if (isRetryable(statusCode, null) && attempt < cfg.MAX_RETRIES_NUM) {
+          if (isRetryable(statusCode, null, cfg.RETRY_ON_5XX_VAL) && attempt < cfg.MAX_RETRIES_NUM) {
             upstreamRes.resume();
             errorHandled = true;
-            recordModelResult(requestModel, { statusCode, durationMs: Date.now() - upstreamStart, error: `retry_${statusCode}` });
             log(ts, `${method} ${rawPath} <- ${statusCode}, retrying (${attempt + 1}/${cfg.MAX_RETRIES_NUM})...`);
             const delay = getRetryDelay(attempt, cfg.RETRY_DELAY);
             setTimeout(async () => {
@@ -265,7 +269,7 @@ export function handleProxyRequest(req, res, streams) {
             filteredHeaders["Cache-Control"] = "no-cache";
             filteredHeaders["Connection"] = "keep-alive";
             filteredHeaders["Pragma"] = "no-cache";
-            filteredHeaders["Expire"] = "0";
+            filteredHeaders["Expires"] = "0";
             if (req.socket && !req.socket.destroyed) {
               req.socket.setKeepAlive(true);
               req.socket.setNoDelay(true);
@@ -374,7 +378,7 @@ export function handleProxyRequest(req, res, streams) {
             return;
           }
 
-          if (attempt < cfg.MAX_RETRIES_NUM && isRetryable(null, e.message)) {
+          if (attempt < cfg.MAX_RETRIES_NUM && isRetryable(null, e.message, cfg.RETRY_ON_5XX_VAL)) {
             log(ts, `${method} ${rawPath} -> ERROR: ${e.message}, retrying (${attempt + 1}/${cfg.MAX_RETRIES_NUM})...`);
             const delay = getRetryDelay(attempt, cfg.RETRY_DELAY);
             await sleep(delay);
@@ -407,7 +411,6 @@ export function handleProxyRequest(req, res, streams) {
         }, cfg.TIMEOUT);
         reqTimer.unref();
 
-        const fullBody = Buffer.concat(body);
         const rawBody = injectPrompt(fullBody, path, cfg.INJECT_SYSTEM_PROMPT_VAL);
         if (rawBody.length) upstreamReq.write(rawBody);
         upstreamReq.end();

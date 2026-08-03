@@ -93,9 +93,19 @@ export function pipeSse({
       hasField = true;
       const lower = trimmed.toLowerCase();
       if (lower.startsWith("data:")) {
-        if (trimmed.slice(5).trim() === "[DONE]") {
+        const dataStr = trimmed.slice(5).trim();
+        if (dataStr === "[DONE]") {
           sawMessageStop = true;
           onMessageStop();
+        } else if (dataStr) {
+          try {
+            const json = JSON.parse(dataStr);
+            const inputTokens = json.message?.usage?.input_tokens ?? json.usage?.prompt_tokens ?? json.usage?.input_tokens;
+            const outputTokens = json.message?.usage?.output_tokens ?? json.usage?.completion_tokens ?? json.usage?.output_tokens;
+            if (inputTokens !== undefined || outputTokens !== undefined) {
+              logDebug(`TOKEN USAGE: input_tokens=${inputTokens ?? "N/A"}, output_tokens=${outputTokens ?? "N/A"}`);
+            }
+          } catch {}
         }
       } else if (lower.startsWith("event:")) {
         if (trimmed.slice(6).trim() === "message_stop") {

@@ -114,10 +114,21 @@ export function isWafBlock(statusCode, body) {
   return html.includes("alicdn") || html.includes("block_message") || html.includes("renderData");
 }
 
-export function isRetryable(statusCode, errorMessage) {
-  if (statusCode >= 500 && statusCode <= 599) return true;
-  if (!statusCode) return true;
-  if (errorMessage && (errorMessage.includes("socket hang up") || errorMessage.includes("timeout") || errorMessage.includes("ECONNRESET") || errorMessage.includes("ETIMEDOUT") || errorMessage.includes("ENETUNREACH"))) return true;
+export function isRetryable(statusCode, errorMessage, retryOn5xx = false) {
+  if (typeof statusCode === "number" && statusCode >= 500 && statusCode <= 599) {
+    return Boolean(retryOn5xx);
+  }
+  if (
+    errorMessage &&
+    typeof errorMessage === "string" &&
+    (errorMessage.includes("socket hang up") ||
+      errorMessage.includes("timeout") ||
+      errorMessage.includes("ECONNRESET") ||
+      errorMessage.includes("ETIMEDOUT") ||
+      errorMessage.includes("ENETUNREACH"))
+  ) {
+    return true;
+  }
   return false;
 }
 

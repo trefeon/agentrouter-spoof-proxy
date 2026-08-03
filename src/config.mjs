@@ -22,6 +22,7 @@ const {
   PROXY_AUTH_TOKEN = "",
   LOG_LEVEL = "info",
   SLOW_RESPONSE_MS = "30000",
+  RETRY_ON_5XX = "false",
 } = process.env;
 
 export const PORT = parseInt(LISTEN_PORT, 10);
@@ -39,6 +40,7 @@ export const BODY_UPLOAD_TIMEOUT = parseInt(BODY_UPLOAD_TIMEOUT_MS, 10);
 export const PROXY_AUTH_TOKEN_VAL = PROXY_AUTH_TOKEN;
 export const IS_DEBUG = LOG_LEVEL === "debug";
 export const SLOW_RESPONSE_MS_INT = parseInt(SLOW_RESPONSE_MS, 10);
+export const RETRY_ON_5XX_VAL = RETRY_ON_5XX === "true";
 
 export const TARGET_HOST_VAL = TARGET_HOST;
 export const MODELS_CSV_VAL = MODELS_CSV;
@@ -66,6 +68,7 @@ export function validateConfig() {
     ["DISCOVERY_INTERVAL_MS", DISCOVERY_INTERVAL, "positive integer (ms)", (v) => Number.isInteger(v) && v > 0],
     ["MAX_RETRIES", MAX_RETRIES_NUM, "integer >= 0", (v) => Number.isInteger(v) && v >= 0],
     ["RETRY_DELAY_MS", RETRY_DELAY, "integer >= 0 (ms)", (v) => Number.isInteger(v) && v >= 0],
+    ["RETRY_ON_5XX", RETRY_ON_5XX, "\"true\" or \"false\"", (v) => v === "true" || v === "false" || v === undefined || v === ""],
     ["TARGET_PROTOCOL", TARGET_PROTOCOL, "\"http\" or \"https\"", (v) => v === "http" || v === "https"],
     ["LISTEN_ADDRESS", LISTEN_ADDRESS, "non-empty IP/hostname", (v) => typeof v === "string" && v.length > 0],
   ];
