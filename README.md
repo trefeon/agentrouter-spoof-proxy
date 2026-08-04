@@ -72,7 +72,9 @@ Wait 5 seconds if `wafCookie: false` — WAF warmup runs at startup.
 |---------|-----|
 | **WAF bypass** | Spoofs Claude Code CLI headers + maintains `acw_tc` cookies |
 | **SSE streaming** | Pipes with backpressure + keepalives; format-aware EOM; never cuts live streams |
-| **Retry logic** | Auto-retry on 5xx/timeout/ECONNRESET with exponential backoff |
+| **Retry logic** | Auto-retry on transport errors with exponential backoff; 5xx retry configurable (`RETRY_ON_5XX`) |
+| **Thinking tag stripping** | Strips `<think>...</think>` tags from Claude responses (`STRIP_THINKING_TAGS`) |
+| **Model-aware headers** | Anthropic headers for `/v1/messages`, generic headers for `/v1/chat/completions` |
 | **Circuit breaker** | Opens after 5 consecutive final 5xx/transport failures, progressive cooldown |
 | **Auto model health** | Failing models removed from `/v1/models` → 9Router falls back instantly |
 | **Model recovery** | Background probe every 60s with spoof headers + WAF cookie |
@@ -118,13 +120,46 @@ All values have defaults — copy `.env.example` to `.env` only if you need to c
 | `SSE_IDLE_TIMEOUT_MS` | `600000` | Terminate stream after no SSE events (dead upstream) |
 | `SSE_CHUNK_TIMEOUT_MS` | `30000` | Stall watchdog — reports slow streams, keeps alive while connected |
 | `BODY_UPLOAD_TIMEOUT_MS` | `60000` | Reject stalled uploads with 408 |
-| `MAX_RETRIES` | `2` | Retry count |
+| `MAX_RETRIES` | `2` | Retry count for transport errors |
+| `RETRY_ON_5XX` | `false` | Also retry on 5xx responses (⚠️ causes double token billing) |
+| `STRIP_THINKING_TAGS` | `true` | Strip `<think>...</think>` from SSE text content |
 | `AR_API_KEY` | _(empty)_ | Enable dynamic model discovery |
 | `INJECT_SYSTEM_PROMPT` | _(empty)_ | System prompt injected into requests |
 | `SLOW_RESPONSE_MS` | `30000` | Temporarily degrades models with slow successful streams |
 | `LOG_LEVEL` | `info` | `info` or `debug` |
 
 See `.env.example` for the full list.
+
+### Retry behavior and token billing
+
+By default (`RETRY_ON_5XX=false`), the proxy only retries on **transport-level errors**
+(timeout, ECONNRESET, socket hang up, ETIMEDOUT). HTTP 5xx responses from the upstream
+are forwarded to the client immediately.
+
+When `RETRY_ON_5XX=true`, the proxy also retries on 5xx responses. **Warning:** each
+retry re-sends the full request body to the upstream, which means the upstream counts
+tokens for every attempt. If a request is retried once, 9Router will show ~2× the input
+tokens. With `MAX_RETRIES=2`, up to 3× is possible.
+
+WAF cookie retries (403/405) always occur regardless of `RETRY_ON_5XX`.
+
+### Thinking tag stripping
+
+The proxy spoofs the `interleaved-thinking-2025-05-14` Anthropic beta header, which
+causes Claude to return thinking content blocks. When downstream clients don't understand
+these blocks, thinking content leaks as raw `<think>...</think>` tags in text output.
+
+With `STRIP_THINKING_TAGS=true` (default), the proxy strips `<think>...</think>` tags
+from SSE response text before forwarding to the client. Tags that span multiple SSE
+chunks are handled correctly. Set to `false` if your client supports thinking content.
+
+### Model-aware headers
+
+The proxy applies different spoof headers based on the request format:
+- **`/v1/messages`** (Anthropic): full Claude Code headers including `Anthropic-Beta`,
+  `Anthropic-Version`, etc.
+- **`/v1/chat/completions`** (OpenAI): generic headers only (User-Agent, Content-Type,
+  Authorization) — no Anthropic-specific headers are sent
 
 ---
 

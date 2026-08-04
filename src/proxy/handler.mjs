@@ -323,6 +323,7 @@ export function handleProxyRequest(req, res, streams) {
             chunkTimeoutMs: cfg.SSE_CHUNK_TIMEOUT,
             idleTimeoutMs: cfg.SSE_IDLE,
             slowResponseMs: cfg.SLOW_RESPONSE_MS_INT,
+            stripThinkingTags: cfg.STRIP_THINKING_TAGS_VAL,
             log: (msg) => log(ts, `${method} ${rawPath} <- ${msg}`),
             logDebug: (msg) => logDebug(ts, `${method} ${rawPath} <- ${msg}`),
             onResult: (r) => recordModelResult(requestModel, r),

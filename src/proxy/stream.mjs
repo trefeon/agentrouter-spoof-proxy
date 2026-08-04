@@ -22,6 +22,7 @@ const KEEPALIVE_INTERVAL = 10000;
 export function pipeSse({
   upstreamRes, upstreamReq, res, isSse, streamFormat = "anthropic",
   chunkTimeoutMs, idleTimeoutMs, slowResponseMs, keepaliveIntervalMs = KEEPALIVE_INTERVAL,
+  stripThinkingTags = false,
   log = () => {}, logDebug = () => {},
   onResult = () => {}, onDegrade = () => {}, onFinish = () => {}, onMessageStop = () => {},
 } = {}) {
@@ -35,6 +36,7 @@ export function pipeSse({
   let chunkTimer = null;
   let keepaliveTimer = null;
   let carry = "";
+  let insideThinkTag = false;
 
   function safeWrite(chunk) {
     if (res.writableEnded) return false;
@@ -204,10 +206,39 @@ export function pipeSse({
     // framing state (previously the timer was armed with the pre-chunk
     // sawDataEvent, killing streams the moment their first real chunk and a
     // thinking pause overlapped).
-    analyze(chunk.toString("utf8"));
+    let chunkText = chunk.toString("utf8");
+    analyze(chunkText);
     logDebug(`CHUNK #${chunkCount} ${chunk.length}b, elapsed ${Date.now() - reqStart}ms`);
     resetChunkTimer();
     resetIdleTimer();
+
+    if (stripThinkingTags && isSse) {
+      let result = "";
+      let i = 0;
+      while (i < chunkText.length) {
+        if (insideThinkTag) {
+          const endIdx = chunkText.indexOf("</think>", i);
+          if (endIdx !== -1) {
+            insideThinkTag = false;
+            i = endIdx + 8;
+          } else {
+            break;
+          }
+        } else {
+          const startIdx = chunkText.indexOf("<think>", i);
+          if (startIdx !== -1) {
+            result += chunkText.slice(i, startIdx);
+            insideThinkTag = true;
+            i = startIdx + 7;
+          } else {
+            result += chunkText.slice(i);
+            break;
+          }
+        }
+      }
+      chunk = Buffer.from(result, "utf8");
+    }
+
     const canContinue = safeWrite(chunk);
     if (canContinue === false && !res.writableEnded) {
       if (res.socket?.destroyed || res.destroyed) {

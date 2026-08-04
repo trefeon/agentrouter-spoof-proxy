@@ -278,4 +278,36 @@ describe("unit: pipeSse", () => {
     assert.equal(debugLogs.some((l) => l.includes("TOKEN USAGE: input_tokens=N/A, output_tokens=42")), true);
     assert.equal(debugLogs.some((l) => l.includes("TOKEN USAGE: input_tokens=100, output_tokens=50")), true);
   });
+
+  it("pipeSse strips <think> tags from SSE text when stripThinkingTags is true", async () => {
+    const h = makeHarness({ stripThinkingTags: true });
+    h.upstreamRes.write(`event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello <think>internal reasoning</think>world"}}\n\n`);
+    h.upstreamRes.end();
+    await sleep(20);
+    assert.equal(h.body.includes("internal reasoning"), false, "thinking content should be stripped");
+    assert.equal(h.body.includes("<think>"), false, "thinking tags should be stripped");
+    assert.equal(h.body.includes("hello "), true, "text before thinking tags should remain");
+    assert.equal(h.body.includes("world"), true, "text after thinking tags should remain");
+  });
+
+  it("pipeSse handles <think> tags spanning multiple chunks", async () => {
+    const h = makeHarness({ stripThinkingTags: true });
+    h.upstreamRes.write(`event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello <think>start of thinking `);
+    await sleep(5);
+    h.upstreamRes.write(`end of thinking</think> World"}}\n\n`);
+    h.upstreamRes.end();
+    await sleep(20);
+    assert.equal(h.body.includes("start of thinking"), false, "content inside multi-chunk thinking tags should be stripped");
+    assert.equal(h.body.includes("end of thinking"), false, "content inside multi-chunk thinking tags should be stripped");
+    assert.equal(h.body.includes("<think>"), false, "tags should be stripped");
+    assert.equal(h.body.includes("Hello  World"), true, "outside content should be concatenated");
+  });
+
+  it("pipeSse passes thinking content when stripThinkingTags is false", async () => {
+    const h = makeHarness({ stripThinkingTags: false });
+    h.upstreamRes.write(`event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello <think>reasoning</think>World"}}\n\n`);
+    h.upstreamRes.end();
+    await sleep(20);
+    assert.equal(h.body.includes("Hello <think>reasoning</think>World"), true, "thinking content should be preserved");
+  });
 });
