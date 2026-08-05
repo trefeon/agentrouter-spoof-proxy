@@ -303,6 +303,48 @@ describe("agentrouter-spoof-proxy", () => {
       assert.ok(req.headers.cookie, "Cookie header should be present");
       assert.ok(req.headers.cookie.includes("acw_tc"), "Cookie should contain acw_tc");
     });
+
+    it("ignores client anthropic-version override on /v1/messages", async () => {
+      mock.setScenario("success");
+      mock.received.length = 0;
+      // proxyHeaders() sends 2023-06-01; override it client-side to prove the
+      // spoof wins over any client-supplied value.
+      await collectSse(fetchStream(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+        method: "POST",
+        headers: { ...proxyHeaders(), "anthropic-version": "2024-10-01" },
+        body: chatBody(),
+      }));
+      const req = mock.received.find((r) => r.method === "POST" && r.url.startsWith("/v1/messages"));
+      assert.ok(req, "upstream received POST");
+      assert.equal(req.headers["anthropic-version"], "2023-06-01",
+        "the spoofed Anthropic-Version must win over the client's anthropic-version");
+    });
+
+    it("captures WAF cookies refreshed on API responses", async () => {
+      mock.setScenario("cookie_refresh");
+      mock.received.length = 0;
+      // First request: upstream rotates a cookie on the SSE response headers.
+      await collectSse(fetchStream(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+        method: "POST",
+        headers: proxyHeaders(),
+        body: chatBody(),
+      }));
+      // Second request must carry BOTH the warmup cookie and the traffic cookie.
+      await collectSse(fetchStream(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+        method: "POST",
+        headers: proxyHeaders(),
+        body: chatBody(),
+      }));
+      const reqs = mock.received.filter((r) => r.method === "POST" && r.url.startsWith("/v1/messages"));
+      assert.ok(reqs.length >= 2, `expected at least 2 upstream POSTs, got ${reqs.length}`);
+      const second = reqs[reqs.length - 1];
+      assert.ok(second.headers.cookie, "Cookie header should be present on the second request");
+      assert.ok(second.headers.cookie.includes("acw_tc=test_mock_cookie"),
+        `warmup cookie must be preserved, got: ${second.headers.cookie}`);
+      assert.ok(second.headers.cookie.includes("cdn_sec_tc=traffic_cookie_1"),
+        `traffic cookie must be captured from the API response, got: ${second.headers.cookie}`);
+      mock.setScenario("success");
+    });
   });
 
   // ── SSE streaming ──
@@ -1091,6 +1133,22 @@ describe("agentrouter-spoof-proxy", () => {
         body: chatBody(),
       }));
       assert.equal(res.statusCode, 200);
+    });
+
+    it("does not forward X-Proxy-Token upstream and keeps client Authorization", async () => {
+      authMock.setScenario("success");
+      authMock.received.length = 0;
+      // Authenticate with X-Proxy-Token while supplying a real upstream
+      // credential in Authorization — the proxy credential must stay local.
+      await collectSse(fetchStream(`http://127.0.0.1:${authPort}/v1/messages`, {
+        method: "POST",
+        headers: { ...proxyHeaders(), "x-proxy-token": AUTH_TOKEN },
+        body: chatBody(),
+      }));
+      const req = authMock.received.find((r) => r.method === "POST" && r.url.startsWith("/v1/messages"));
+      assert.ok(req, "upstream received POST");
+      assert.equal(req.headers.authorization, "Bearer sk_test", "client Authorization must be forwarded unchanged");
+      assert.equal(req.headers["x-proxy-token"], undefined, "X-Proxy-Token must never reach upstream");
     });
 
     it("health endpoint stays reachable without auth", async () => {

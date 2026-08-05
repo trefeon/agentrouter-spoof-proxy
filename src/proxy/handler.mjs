@@ -16,7 +16,7 @@ import { log, logDebug } from "../logger.mjs";
 import { buildError, isOurError, E_TIMEOUT, E_CIRCUIT, E_UPSTREAM, E_INTERNAL } from "../errors.mjs";
 import { codeToStatus } from "../status-code.mjs";
 import { isCircuitOpen, recordSuccess, recordFailure } from "../resilience/circuit-breaker.mjs";
-import { getWafCookie, warmup } from "../auth/waf.mjs";
+import { getWafCookie, warmup, captureWafCookies } from "../auth/waf.mjs";
 import { SPOOF_HEADERS, GENERIC_SPOOF_HEADERS } from "../auth/spoof.mjs";
 import { markModelFailed, markModelExhausted, markModelDegraded } from "../models/health.mjs";
 import { recordModelStart, recordModelResult } from "../models/stats.mjs";
@@ -141,12 +141,16 @@ export function handleProxyRequest(req, res, streams) {
     const isAnthropic = path.startsWith("/v1/messages");
     const spoofHeaders = isAnthropic ? SPOOF_HEADERS : GENERIC_SPOOF_HEADERS;
 
+    // The proxy's spoof owns `Anthropic-Version` / `Anthropic-Beta` — clients
+    // supply only `Authorization` / `x-api-key`. A client-supplied
+    // `anthropic-version` is intentionally NOT forwarded: Node lowercases
+    // outgoing header names, so a pass-through entry would silently overwrite
+    // the spoofed value (same normalized key, last one set wins).
     const upstreamHeaders = {
       ...spoofHeaders,
       "Content-Type": "application/json",
       ...(req.headers["authorization"] ? { Authorization: req.headers["authorization"] } : {}),
       ...(req.headers["x-api-key"] ? { "x-api-key": req.headers["x-api-key"] } : {}),
-      ...(isAnthropic && req.headers["anthropic-version"] ? { "anthropic-version": req.headers["anthropic-version"] } : {}),
     };
 
     const wafCookie = getWafCookie();
@@ -192,6 +196,10 @@ export function handleProxyRequest(req, res, streams) {
         const upstreamReq = cfg.UPSTREAM_MODULE.request(opts, (upstreamRes) => {
           upstreamResponded = true;
           clearIdleTimer();
+          // Every upstream response (200, non-200, WAF block) may rotate WAF
+          // session cookies — capture them so the next request carries the
+          // freshest values instead of waiting for the next warmup cycle.
+          captureWafCookies(upstreamRes.headers);
           const statusCode = upstreamRes.statusCode;
           const upstreamStart = Date.now();
 

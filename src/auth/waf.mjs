@@ -14,23 +14,61 @@ const WARMUP_HEADERS = {
   "Sec-Fetch-User": "?1",
 };
 
-let wafCookieStr = "";
+// Known WAF/edge session-cookie names. Set-Cookie entries with any other name
+// are treated as non-WAF (browser/app cookies) and never shipped upstream.
+const WAF_COOKIE_NAMES = new Set(["acw_tc", "acw_sc__v2", "acw_sc__v3", "cdn_sec_tc"]);
+
+let wafCookies = [];
 
 export function getWafCookie() {
-  return wafCookieStr;
+  return wafCookies.join("; ");
 }
 
+// Parse a `set-cookie` header (string or array) and return the valid WAF
+// cookies as `name=value` strings. Expired/cleared cookies (`name=; max-age=0`)
+// and entries without a `=` are skipped: an empty value must never be shipped
+// inside the `Cookie` header — the upstream WAF would read it as a *failed*
+// challenge (worse than no cookie at all).
 export function extractWafCookies(res) {
   const raw = res.headers["set-cookie"] || [];
   const cookies = Array.isArray(raw) ? raw : [raw];
   const waf = [];
   for (const c of cookies) {
-    const name = c.split("=")[0];
-    if (name === "acw_tc" || name === "acw_sc__v2" || name === "cdn_sec_tc") {
-      waf.push(c.split(";")[0]);
-    }
+    const pair = c.split(";")[0];
+    const eq = pair.indexOf("=");
+    if (eq < 1) continue; // no `=` or empty name → skip
+    const name = pair.slice(0, eq).trim();
+    const value = pair.slice(eq + 1).trim();
+    if (!WAF_COOKIE_NAMES.has(name) || !value) continue;
+    waf.push(`${name}=${value}`);
   }
   return waf;
+}
+
+// Merge cookie lists keyed by cookie NAME: a fresh value replaces the old one
+// for the same name while unrelated names are preserved. Both captureWafCookies
+// and warmup use this so traffic-captured cookies survive the next warmup.
+export function mergeWafCookies(current, fresh) {
+  const out = [...current];
+  for (const c of fresh) {
+    const eq = c.indexOf("=");
+    const name = c.slice(0, eq);
+    const i = out.findIndex((old) => old.slice(0, old.indexOf("=")) === name);
+    if (i === -1) out.push(c);
+    else out[i] = c;
+  }
+  return out;
+}
+
+// Merge WAF cookies seen on a live upstream response into the store, keyed by
+// cookie NAME: a fresh value replaces the old one for the same name while
+// unrelated names are preserved. No-op when the response carries no valid WAF
+// cookies. This lets a rotated `acw_tc`/`cdn_sec_tc` on an API response be
+// picked up immediately instead of waiting for the next warmup cycle.
+export function captureWafCookies(headers = {}) {
+  const fresh = extractWafCookies({ headers });
+  if (!fresh.length) return;
+  wafCookies = mergeWafCookies(wafCookies, fresh);
 }
 
 export async function warmup() {
@@ -62,7 +100,12 @@ export async function warmup() {
       });
 
       if (cookie.length) {
-        wafCookieStr = cookie.join("; ");
+        // Merge, not replace: the warmup GET "/" may not return every WAF
+        // cookie the traffic path captured (e.g. `cdn_sec_tc` seen on an API
+        // response) — dropping them on the next warmup cycle would regress the
+        // traffic-time refresh. Fresh warmup values win for the names it
+        // returns; traffic-only names are preserved.
+        wafCookies = mergeWafCookies(wafCookies, cookie);
         log(ts, `WARMUP → 200 cookies: ${cookie.length}`);
         return;
       }

@@ -108,10 +108,15 @@ export function respondJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
+// WAF block-page markers (Alibaba-Cloud-style). `waf.js` is the static
+// challenge script referenced by block pages; it catches pages that strip the
+// alicdn/block_message markers. Only evaluated on 403/405 upstream bodies.
+const WAF_BLOCK_MARKERS = ["alicdn", "block_message", "renderData", "waf.js"];
+
 export function isWafBlock(statusCode, body) {
   if (statusCode !== 405 && statusCode !== 403) return false;
   const html = typeof body === "string" ? body : body.toString("utf8");
-  return html.includes("alicdn") || html.includes("block_message") || html.includes("renderData");
+  return WAF_BLOCK_MARKERS.some((m) => html.includes(m));
 }
 
 export function isRetryable(statusCode, errorMessage, retryOn5xx = false) {

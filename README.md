@@ -161,6 +161,11 @@ The proxy applies different spoof headers based on the request format:
 - **`/v1/chat/completions`** (OpenAI): generic headers only (User-Agent, Content-Type,
   Authorization) — no Anthropic-specific headers are sent
 
+The proxy owns the canonical `Anthropic-Version`/`Anthropic-Beta` spoof values — a
+client-supplied `anthropic-version` on `/v1/messages` is intentionally ignored so the
+spoofed identity can't be distorted. WAF cookies are also refreshed from API responses,
+not just the warmup loop, so rotated session cookies are picked up immediately.
+
 ---
 
 ## Models

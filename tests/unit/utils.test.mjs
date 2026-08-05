@@ -96,6 +96,10 @@ describe("unit: isWafBlock", () => {
   it("works with buffer body", () => {
     assert.equal(isWafBlock(405, Buffer.from('<script src="//alicdn.com/waf.js"></script>')), true);
   });
+  it("true for 403 with waf.js but none of the old markers", () => {
+    const body = '<html><script src="https://static.aliyun-waf.example/waf.js"></script></html>';
+    assert.equal(isWafBlock(403, body), true);
+  });
 });
 
 describe("unit: isRetryable", () => {
@@ -176,6 +180,30 @@ describe("unit: extractWafCookies", () => {
     const cookies = extractWafCookies(res);
     assert.equal(cookies.length, 1);
     assert.equal(cookies[0], "acw_tc=xyz");
+  });
+  it("skips expired acw_sc__v2 (empty value)", () => {
+    const res = { headers: { "set-cookie": ["acw_sc__v2=; max-age=0"] } };
+    assert.deepStrictEqual(extractWafCookies(res), []);
+  });
+  it("skips acw_tc with empty value", () => {
+    const res = { headers: { "set-cookie": ["acw_tc=; Path=/"] } };
+    assert.deepStrictEqual(extractWafCookies(res), []);
+  });
+  it("extracts acw_sc__v3 cookie", () => {
+    const res = { headers: { "set-cookie": ["acw_sc__v3=slider; Path=/"] } };
+    const cookies = extractWafCookies(res);
+    assert.equal(cookies.length, 1);
+    assert.equal(cookies[0], "acw_sc__v3=slider");
+  });
+  it("skips entry without an equals sign", () => {
+    const res = { headers: { "set-cookie": ["sessionvalue"] } };
+    assert.deepStrictEqual(extractWafCookies(res), []);
+  });
+  it("keeps only the valid WAF cookie in a mixed batch", () => {
+    const res = { headers: { "set-cookie": ["acw_tc=abc123; Path=/", "acw_sc__v2=; max-age=0"] } };
+    const cookies = extractWafCookies(res);
+    assert.equal(cookies.length, 1);
+    assert.equal(cookies[0], "acw_tc=abc123");
   });
 });
 

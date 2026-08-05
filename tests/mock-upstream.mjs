@@ -104,6 +104,14 @@ export class MockUpstream {
         this._sse(res, () => { for (const c of SSE_CHUNKS) res.write(c); });
         break;
 
+      // Success stream that ALSO rotates a WAF cookie on the API response —
+      // exercises the handler's captureWafCookies refresh on live traffic.
+      case "cookie_refresh":
+        this._sse(res, () => { for (const c of SSE_CHUNKS) res.write(c); }, {
+          "set-cookie": ["cdn_sec_tc=traffic_cookie_1; Path=/; Secure"],
+        });
+        break;
+
       case "thinking_stream":
         this._sse(res, () => { for (const c of THINKING_CHUNKS) res.write(c); });
         break;
@@ -202,11 +210,12 @@ export class MockUpstream {
     }
   }
 
-  _sse(res, writeFn) {
+  _sse(res, writeFn, extraHeaders = {}) {
     res.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
       connection: "keep-alive",
+      ...extraHeaders,
     });
     const result = writeFn();
     if (result instanceof Promise) {
