@@ -135,7 +135,7 @@ export function handleProxyRequest(req, res, streams) {
 
     // Extract model from body for reactive health marking
     let requestModel = null;
-    try { requestModel = JSON.parse(fullBody.toString("utf8"))?.model || null; } catch {}
+    requestModel = requestSummary.model || null;
     if (requestModel) recordModelStart(requestModel);
 
     const isAnthropic = path.startsWith("/v1/messages");
