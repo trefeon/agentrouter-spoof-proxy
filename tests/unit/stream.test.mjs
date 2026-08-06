@@ -305,9 +305,9 @@ describe("unit: pipeSse", () => {
     assert.equal(debugLogs.some((l) => l.includes("TOKEN USAGE: input_tokens=100, output_tokens=50")), true);
   });
 
-  it("pipeSse strips <think> tags from SSE text when stripThinkingTags is true", async () => {
-    const h = makeHarness({ stripThinkingTags: true });
-    h.upstreamRes.write(`event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello <think>internal reasoning</think>world"}}\n\n`);
+  it("pipeSse strips <think> tags from SSE text when stripThinkingTags is true (OpenAI format)", async () => {
+    const h = makeHarness({ stripThinkingTags: true, streamFormat: "openai" });
+    h.upstreamRes.write(`data: {"id":"c","choices":[{"delta":{"content":"hello <think>internal reasoning</think>world"}}]}\n\n`);
     h.upstreamRes.end();
     await sleep(20);
     assert.equal(h.body.includes("internal reasoning"), false, "thinking content should be stripped");
@@ -316,11 +316,11 @@ describe("unit: pipeSse", () => {
     assert.equal(h.body.includes("world"), true, "text after thinking tags should remain");
   });
 
-  it("pipeSse handles <think> tags spanning multiple chunks", async () => {
-    const h = makeHarness({ stripThinkingTags: true });
-    h.upstreamRes.write(`event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello <think>start of thinking `);
+  it("pipeSse handles <think> tags spanning multiple chunks (OpenAI format)", async () => {
+    const h = makeHarness({ stripThinkingTags: true, streamFormat: "openai" });
+    h.upstreamRes.write(`data: {"id":"c","choices":[{"delta":{"content":"Hello <think>start of thinking `);
     await sleep(5);
-    h.upstreamRes.write(`end of thinking</think> World"}}\n\n`);
+    h.upstreamRes.write(`end of thinking</think> World"}}]\n\n`);
     h.upstreamRes.end();
     await sleep(20);
     assert.equal(h.body.includes("start of thinking"), false, "content inside multi-chunk thinking tags should be stripped");
@@ -330,10 +330,135 @@ describe("unit: pipeSse", () => {
   });
 
   it("pipeSse passes thinking content when stripThinkingTags is false", async () => {
-    const h = makeHarness({ stripThinkingTags: false });
-    h.upstreamRes.write(`event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello <think>reasoning</think>World"}}\n\n`);
+    const h = makeHarness({ stripThinkingTags: false, streamFormat: "openai" });
+    h.upstreamRes.write(`data: {"id":"c","choices":[{"delta":{"content":"Hello <think>reasoning</think>World"}}]}\n\n`);
     h.upstreamRes.end();
     await sleep(20);
     assert.equal(h.body.includes("Hello <think>reasoning</think>World"), true, "thinking content should be preserved");
+  });
+
+  it("pipeSse does NOT strip thinking on Anthropic-format streams even when stripThinkingTags is true", async () => {
+    const h = makeHarness({ stripThinkingTags: true, streamFormat: "anthropic" });
+    h.upstreamRes.write(`event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello <think>reasoning</think>World"}}\n\n`);
+    h.upstreamRes.end();
+    await sleep(20);
+    assert.equal(h.body.includes("Hello <think>reasoning</think>World"), true, "Anthropic harness clients support thinking natively — must pass through");
+  });
+
+  it("UTF-8 multibyte chars split across TCP chunks are never corrupted (OpenAI format, strip on)", async () => {
+    const h = makeHarness({ stripThinkingTags: true, streamFormat: "openai" });
+    // 中 = E4 B8 AD. Cut the frame mid-character: first chunk ends with E4.
+    const frame = Buffer.from('data: {"id":"c","choices":[{"delta":{"content":"\u4e2d\u7684"}}]}\n\n', "utf8");
+    const cut = frame.indexOf(Buffer.from("\u4e2d", "utf8")) + 1; // mid-中
+    h.upstreamRes.write(frame.subarray(0, cut));
+    h.upstreamRes.write(frame.subarray(cut));
+    h.upstreamRes.end();
+    await sleep(20);
+    assert.equal(h.body.includes("\uFFFD"), false, "no replacement chars allowed");
+    assert.equal(h.body.includes("\u4e2d\u7684"), true, "中的 must survive the strip path intact");
+  });
+
+  it("OpenAI format: data: null frames split across TCP chunks are dropped", async () => {
+    const h = makeHarness({ streamFormat: "openai" });
+    h.upstreamRes.write(`data: {"id":"chatcmpl-abc","choices":[{"delta":{"content":"hi"}}]}\n\ndata: nu`);
+    h.upstreamRes.write(`ll\n\ndata: {"id":"chatcmpl-abc","choices":[{"delta":{"content":" there"}}]}\n\n${SSE_DONE}\n\n`);
+    h.upstreamRes.end();
+    await sleep(20);
+    assert.equal(h.body.includes("data: null"), false, "split data:null frame must be stripped");
+    assert.equal(h.body.includes('"content":"hi"'), true, "real chunk must pass through");
+    assert.equal(h.body.includes('"content":" there"'), true, "chunk after the split frame must pass through");
+    assert.equal(h.body.includes(SSE_DONE), true, "[DONE] must remain");
+    assert.equal(h.events.finished, 1);
+  });
+
+  it("OpenAI format: bare data: lines (empty payload) are dropped", async () => {
+    const h = makeHarness({ streamFormat: "openai" });
+    h.upstreamRes.write(`data: {"id":"a","choices":[{"delta":{"content":"x"}}]}\n\n`);
+    h.upstreamRes.write(`data:\n\n`);
+    h.upstreamRes.write(`data: {"id":"a","choices":[{"delta":{"content":"y"}}]}\n\n${SSE_DONE}\n\n`);
+    h.upstreamRes.end();
+    await sleep(20);
+    assert.equal(h.body.includes("data:\n\n"), false, "bare data: line must be dropped");
+    assert.equal(h.body.includes('"content":"x"'), true);
+    assert.equal(h.body.includes('"content":"y"'), true);
+  });
+
+  it("abnormal end carries a protocol error frame before the finisher (Anthropic)", async () => {
+    const h = makeHarness();
+    h.upstreamRes.write("event: message_start\ndata: {}\n\n");
+    await sleep(10);
+    h.upstreamRes.destroy();
+    await sleep(20);
+    assert.equal(h.body.includes("event: error"), true, "error frame must precede the finisher");
+    assert.equal(h.body.includes("upstream_closed"), true, "error frame must carry the reason");
+    assert.equal(h.body.includes("message_delta"), true, "synthetic message_delta finisher must be present");
+    assert.equal(h.body.endsWith(EOM_TAIL), true, "terminal message_stop must still terminate");
+  });
+
+  it("abnormal end carries a protocol error frame before the finisher (OpenAI)", async () => {
+    const h = makeHarness({ streamFormat: "openai" });
+    h.upstreamRes.write(`data: {"id":"a","choices":[{"delta":{"content":"partial"}}]}\n\n`);
+    await sleep(10);
+    h.upstreamRes.destroy();
+    await sleep(20);
+    assert.equal(h.body.includes('"error"'), true, "error chunk must precede the finisher");
+    assert.equal(h.body.includes("upstream_closed"), true, "error chunk must carry the reason");
+    assert.equal(h.body.includes("finish_reason"), true, "synthetic finish_reason chunk must be present");
+    assert.equal(h.body.endsWith(`\ndata: [DONE]\n\n`), true, "terminal [DONE] must still terminate");
+  });
+
+  it("normal completion never injects error frames", async () => {
+    const h = makeHarness();
+    h.upstreamRes.write("event: message_start\ndata: {}\n\n");
+    h.upstreamRes.write(`event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n`);
+    h.upstreamRes.write(`${SSE_EOM}\ndata: {}\n\n`);
+    h.upstreamRes.end();
+    await sleep(20);
+    assert.equal(h.body.includes("event: error"), false, "no error frame on normal completion");
+    assert.equal(h.events.results[0].statusCode, 200);
+  });
+
+  it("event: ping frames count as noise, not model data", async () => {
+    const h = makeHarness();
+    h.upstreamRes.write(`event: ping\ndata: {"type":"ping"}\n\n`);
+    h.upstreamRes.write(`event: ping\ndata: {"type":"ping"}\n\n`);
+    h.upstreamRes.end();
+    await sleep(20);
+    assert.deepStrictEqual(h.events.degrades, ["empty_sse"], "ping-only stream is empty");
+    assert.equal(h.events.results[0].emptyOutput, true);
+    assert.equal(h.events.messageStops, 0);
+  });
+
+  it("pipeSse strips a <think> tag split mid-tag across TCP chunks (OpenAI format)", async () => {
+    const h = makeHarness({ stripThinkingTags: true, streamFormat: "openai" });
+    h.upstreamRes.write(`data: {"id":"c","choices":[{"delta":{"content":"<thi`);
+    h.upstreamRes.write(`nk>SECRET</think>responseWorld"}}]\n\n`);
+    h.upstreamRes.end();
+    await sleep(20);
+    assert.equal(h.body.includes("SECRET"), false, "thinking content split mid-tag must be stripped");
+    assert.equal(h.body.includes("<think>"), false, "split tag must be stripped, not leaked");
+    assert.equal(h.body.includes("World"), true, "text after the stripped span must remain");
+  });
+
+  it("pipeSse reports 502 when upstream ends mid <think> span (OpenAI format)", async () => {
+    const h = makeHarness({ stripThinkingTags: true, streamFormat: "openai" });
+    h.upstreamRes.write(`data: {"id":"c","choices":[{"delta":{"content":"hi <think>never`);
+    h.upstreamRes.end();
+    await sleep(20);
+    assert.equal(h.events.results[0].statusCode, 502);
+    assert.equal(h.events.results[0].error, "upstream_ended_mid_frame");
+    assert.equal(h.body.includes("never"), false);
+  });
+
+  it("pipeSse forwards a trailing held <think> prefix on normal upstream end (OpenAI format)", async () => {
+    const h = makeHarness({ stripThinkingTags: true, streamFormat: "openai" });
+    // Ends with a lone "<" — held back as a possible tag prefix, never
+    // completed into a real tag. On normal end it must be forwarded, not
+    // silently dropped.
+    h.upstreamRes.write(`data: {"id":"c","choices":[{"delta":{"content":"ok <`);
+    h.upstreamRes.end();
+    await sleep(20);
+    assert.equal(h.body.includes("<"), true, "held prefix bytes must be forwarded, not dropped");
+    assert.equal(h.events.results[0].statusCode, 200);
   });
 });

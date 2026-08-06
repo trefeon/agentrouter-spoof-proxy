@@ -19,6 +19,32 @@ export function eomTail(streamFormat = "anthropic") {
   return streamFormat === "openai" ? `\ndata: [DONE]\n\n` : `\n${SSE_EOM}\ndata: {}\n\n`;
 }
 
+// Protocol error frame written BEFORE the terminal EOM when a stream ends
+// abnormally (timeout, upstream error/close, post-partial-response failure).
+// Strict SDKs surface these as stream errors instead of treating a truncated
+// answer as a clean completion; the EOM tail still terminates lax parsers.
+export function sseErrorFrame(streamFormat = "anthropic", message = "proxy stream error") {
+  if (streamFormat === "openai") {
+    return `data: ${JSON.stringify({ error: { message, type: "proxy_error" } })}\n\n`;
+  }
+  return `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "proxy_error", message } })}\n\n`;
+}
+
+// Synthetic "stream is over" sequence for ABNORMAL ends. Harness clients do not
+// finalize on `message_stop`/`[DONE]` alone: opencode finishes on
+// `message_delta.stop_reason` / a chunk's `finish_reason`, OpenClaw needs
+// `message_delta` for its stop reason, and the Anthropic SDK requires
+// `message_stop` for finalMessage(). This emits a finish-reason-bearing frame
+// followed by the protocol terminal marker, so every client class terminates
+// cleanly. The error frame (sseErrorFrame) written before it still surfaces
+// the failure to strict SDKs.
+export function abnormalFinish(streamFormat = "anthropic") {
+  if (streamFormat === "openai") {
+    return `\ndata: ${JSON.stringify({ id: "proxy-eom", object: "chat.completion.chunk", created: 0, model: "", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`;
+  }
+  return `\nevent: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 0 } })}\n\nevent: message_stop\ndata: {}\n\n`;
+}
+
 // ── Pure functions ──
 
 export function truncate(str, max = 500) {

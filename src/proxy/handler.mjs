@@ -21,7 +21,7 @@ import { SPOOF_HEADERS, GENERIC_SPOOF_HEADERS } from "../auth/spoof.mjs";
 import { markModelFailed, markModelExhausted, markModelDegraded } from "../models/health.mjs";
 import { recordModelStart, recordModelResult } from "../models/stats.mjs";
 import {
-  MAX_BODY_SIZE, eomTail,
+  MAX_BODY_SIZE, sseErrorFrame, abnormalFinish,
   truncate, filterHeaders, rewritePath, respondJson,
   isWafBlock, isRetryable, getRetryDelay, getResponseTimeout, injectPrompt, summarizeRequest, responseHasEmptyOutput, redactSensitive,
 } from "../utils.mjs";
@@ -267,7 +267,13 @@ export function handleProxyRequest(req, res, streams) {
           }
 
           const filteredHeaders = filterHeaders(upstreamRes.headers);
-          isSse = (upstreamRes.headers["content-type"] || "").includes("text/event-stream");
+          // SSE detection: trust the upstream Content-Type first; fall back to
+          // the request intent (`"stream": true`) so a missing/mislabeled
+          // content-type does not silently disable keepalives, EOM injection
+          // and the idle/stall watchdogs (client would hang waiting for a
+          // terminal marker).
+          const sseByContentType = (upstreamRes.headers["content-type"] || "").includes("text/event-stream");
+          isSse = sseByContentType || (statusCode === 200 && requestSummary.stream === true);
           if (filteredHeaders["set-cookie"]) {
             const v = filteredHeaders["set-cookie"];
             filteredHeaders["set-cookie"] = Array.isArray(v) ? v : [v];
@@ -288,6 +294,7 @@ export function handleProxyRequest(req, res, streams) {
           if (statusCode !== 200) {
             if (!safeWriteHead(statusCode, filteredHeaders)) {
               upstreamRes.resume();
+              if (!upstreamReq.destroyed) upstreamReq.destroy();
               finishProxy();
               resolveProxy();
               return;
@@ -319,6 +326,7 @@ export function handleProxyRequest(req, res, streams) {
 
           if (!safeWriteHead(200, filteredHeaders)) {
             upstreamRes.resume();
+            if (!upstreamReq.destroyed) upstreamReq.destroy();
             finishProxy();
             resolveProxy();
             return;
@@ -380,7 +388,12 @@ export function handleProxyRequest(req, res, streams) {
             recordFailure();
             log(ts, `${method} ${rawPath} -> STREAM ERROR after partial response: ${e.message}`);
             recordModelResult(requestModel, { statusCode: 502, error: e.message });
-            if (isSse && !sawMessageStop) { try { res.write(eomTail(streamFormat)); } catch {} }
+            if (isSse && !sawMessageStop) {
+              // Error frame first (strict SDKs surface it), then the synthetic
+              // finisher so harness clients terminate cleanly.
+              try { res.write(sseErrorFrame(streamFormat, "upstream_error")); } catch {}
+              try { res.write(abnormalFinish(streamFormat)); } catch {}
+            }
             try { res.end(); } catch {}
             finishProxy();
             resolveProxy();

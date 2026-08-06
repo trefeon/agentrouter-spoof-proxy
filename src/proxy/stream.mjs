@@ -12,10 +12,11 @@
 //   sawMessageStop  — terminal marker seen (Anthropic `event: message_stop` or
 //                     OpenAI `data: [DONE]`); skips synthetic EOM injection
 //
-// Terminal marker and injected EOM are format-aware (see utils.eomTail) so
-// Anthropic clients get `message_stop` and OpenAI clients get `data: [DONE]`.
+// Terminal marker and injected EOM are format-aware (see utils.eomTail /
+// abnormalFinish) so Anthropic clients get `message_stop` and OpenAI clients
+// get `data: [DONE]`; abnormal ends additionally carry a protocol error frame.
 
-import { eomTail } from "../utils.mjs";
+import { sseErrorFrame, abnormalFinish } from "../utils.mjs";
 
 const KEEPALIVE_INTERVAL = 10000;
 
@@ -37,6 +38,17 @@ export function pipeSse({
   let keepaliveTimer = null;
   let carry = "";
   let insideThinkTag = false;
+  // Byte-level residue for transforms that must not corrupt multi-byte UTF-8:
+  //   thinkBuf   — bytes of an unresolved `<think>` span awaiting `</think>`
+  //   openaiPending — incomplete SSE frame (no trailing `\n\n` yet) held back
+  //                   so `data: null` keepalives split across TCP chunks are
+  //                   still filtered at the frame level
+  let thinkBuf = Buffer.alloc(0);
+  let openaiPending = Buffer.alloc(0);
+  // Trailing bytes of a chunk that could be the prefix of a `<think>` tag
+  // split across TCP chunks (at most 6 bytes: "<think>"). Held back until
+  // the next chunk arrives so the tag is detected and stripped, not leaked.
+  let tagPrefixPending = Buffer.alloc(0);
 
   function safeWrite(chunk) {
     if (res.writableEnded) return false;
@@ -62,8 +74,16 @@ export function pipeSse({
     onFinish();
   }
 
-  function endWithEom() {
-    if (isSse && !sawMessageStop) safeWrite(eomTail(streamFormat));
+  // Abnormal end: emit a protocol error frame first so strict SDK clients
+  // surface the failure instead of treating a truncated stream as a clean
+  // completion, then a synthetic finisher + terminal marker so every client
+  // class (opencode finalizes on finish_reason/message_delta, Anthropic SDK
+  // needs message_stop, lax parsers need [DONE]) terminates cleanly.
+  function endWithEom(reason) {
+    if (isSse && !sawMessageStop) {
+      if (reason) safeWrite(sseErrorFrame(streamFormat, reason));
+      safeWrite(abnormalFinish(streamFormat));
+    }
     safeEnd();
   }
 
@@ -88,11 +108,18 @@ export function pipeSse({
   function classifyBlock(block) {
     if (!block.trim()) return;
     let hasField = false;
+    let isPing = false;
     for (const line of block.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       if (trimmed.startsWith(":")) continue;
       hasField = true;
+      if (trimmed.toLowerCase().startsWith("event:") && trimmed.slice(6).trim() === "ping") {
+        // Liveness frames (`event: ping`) are noise, not model data: they keep
+        // the connection alive but must not skew empty-stream detection or the
+        // stall-watchdog reason.
+        isPing = true;
+      }
       const lower = trimmed.toLowerCase();
       if (lower.startsWith("data:")) {
         const dataStr = trimmed.slice(5).trim();
@@ -116,7 +143,7 @@ export function pipeSse({
         }
       }
     }
-    if (hasField) sawDataEvent = true;
+    if (hasField && !isPing) sawDataEvent = true;
   }
 
   function flushCarry() {
@@ -146,7 +173,7 @@ export function pipeSse({
         log(`SSE IDLE TIMEOUT (${idleTimeoutMs / 1000}s no events)`);
         onResult({ statusCode: 504, durationMs: Date.now() - reqStart, chunks: chunkCount, error: "sse_idle_timeout" });
         onDegrade("sse_idle_timeout");
-        endWithEom();
+        endWithEom("sse_idle_timeout");
         if (!upstreamReq.destroyed) upstreamReq.destroy();
         finishStream();
       }, idleTimeoutMs);
@@ -174,7 +201,7 @@ export function pipeSse({
       log(`${reason.toUpperCase()} (${chunkCount} chunks)`);
       onResult({ statusCode: 504, durationMs: Date.now() - reqStart, chunks: chunkCount, error: reason });
       onDegrade(reason);
-      endWithEom();
+      endWithEom(reason);
       if (!upstreamReq.destroyed) upstreamReq.destroy();
       finishStream();
     }, chunkTimeoutMs);
@@ -212,54 +239,112 @@ export function pipeSse({
     resetChunkTimer();
     resetIdleTimer();
 
-    if (stripThinkingTags && isSse) {
-      let result = "";
-      let i = 0;
-      while (i < chunkText.length) {
-        if (insideThinkTag) {
-          const endIdx = chunkText.indexOf("</think>", i);
-          if (endIdx !== -1) {
+    // Byte-level `<think>` span stripping. OpenAI-format streams only: OpenAI
+    // clients cannot render thinking blocks and would show raw tags, while
+    // Anthropic-protocol harness clients (opencode, OpenClaw, claude-code)
+    // support thinking natively — stripping it there would remove reasoning AND
+    // create silent gaps that trigger client-side idle watchdogs. Unlike the
+    // old string-based stripper, raw bytes are never decoded and re-encoded:
+    // chunks without a tag boundary pass through untouched, and spans split
+    // across TCP chunks (or adjacent to multi-byte UTF-8) are resolved
+    // byte-faithfully, so CJK/emoji content is never corrupted.
+    if (stripThinkingTags && isSse && streamFormat === "openai") {
+      let buf = chunk;
+      if (tagPrefixPending.length) { buf = Buffer.concat([tagPrefixPending, chunk]); tagPrefixPending = Buffer.alloc(0); }
+      if (insideThinkTag || buf.includes(Buffer.from("<think>"))) {
+        thinkBuf = Buffer.concat([thinkBuf, buf]);
+        const out = [];
+        let pos = 0;
+        while (true) {
+          if (insideThinkTag) {
+            const endIdx = thinkBuf.indexOf(Buffer.from("</think>"), pos);
+            if (endIdx === -1) break;
             insideThinkTag = false;
-            i = endIdx + 8;
+            pos = endIdx + 8;
           } else {
-            break;
-          }
-        } else {
-          const startIdx = chunkText.indexOf("<think>", i);
-          if (startIdx !== -1) {
-            result += chunkText.slice(i, startIdx);
+            const startIdx = thinkBuf.indexOf(Buffer.from("<think>"), pos);
+            if (startIdx === -1) {
+              out.push(thinkBuf.subarray(pos));
+              pos = thinkBuf.length;
+              break;
+            }
+            out.push(thinkBuf.subarray(pos, startIdx));
             insideThinkTag = true;
-            i = startIdx + 7;
-          } else {
-            result += chunkText.slice(i);
-            break;
+            pos = startIdx + 7;
           }
         }
+        if (insideThinkTag) {
+          // Unresolved span: retain only the unclosed `<think>` bytes; forward
+          // the clean prefix (text before the span).
+          const spanStart = thinkBuf.indexOf(Buffer.from("<think>"));
+          thinkBuf = thinkBuf.subarray(spanStart === -1 ? 0 : spanStart);
+          if (out.length) chunk = Buffer.concat(out);
+          else chunk = Buffer.alloc(0);
+        } else {
+          chunk = Buffer.concat(out);
+          thinkBuf = Buffer.alloc(0);
+        }
+      } else {
+        // No tag boundary in this chunk: forward it, but hold back up to 6
+        // trailing bytes that could be the prefix of a `<think>` tag split
+        // across TCP chunks (e.g. `...<thi` | `nk>SECRET response...`) so the
+        // tag is still detected and stripped on the next chunk. A held prefix
+        // that never completes materializes on the following chunk unchanged.
+        let hold = 0;
+        for (let len = 6; len >= 1; len--) {
+          if (buf.subarray(buf.length - len).equals(Buffer.from("<think>".slice(0, len), "latin1"))) { hold = len; break; }
+        }
+        if (hold > 0) { tagPrefixPending = buf.subarray(buf.length - hold); chunk = buf.subarray(0, buf.length - hold); }
+        else { chunk = buf; }
       }
-      chunk = Buffer.from(result, "utf8");
     }
 
-    // AgentRouter (new-api) emits bare `data: null` frames as keepalive/
-    // separators on reasoning-model streams. OpenAI SDK and AI SDK clients
-    // validate every `data:` line as a chunk object, so a JSON `null` payload
-    // fails with "Type validation failed: Value: null". Drop those frames from
-    // OpenAI streams before they reach the client.
-    if (isSse && streamFormat === "openai" && chunkText.includes("data: null")) {
-      const cleaned = chunk
-        .toString("utf8")
-        .split("\n")
-        .filter((line) => line.trim() !== "data: null")
-        .join("\n");
-      if (cleaned.length !== chunk.length) {
-        logDebug(`dropped data:null keepalive frame(s), ${chunk.length} -> ${cleaned.length} bytes`);
-        chunk = Buffer.from(cleaned, "utf8");
+    // Frame-level `data: null` / bare `data:` keepalive filtering (OpenAI
+    // format). AgentRouter (new-api) emits bare `data: null` frames as
+    // keepalives; schema-validating clients (AI SDK, opencode llm layer) fail
+    // on `null` and empty payloads. Hold the incomplete frame tail so frames
+    // split across TCP chunks are still filtered; untouched frames are
+    // forwarded as raw bytes (no decode/encode, no corruption).
+    if (isSse && streamFormat === "openai") {
+      const combined = openaiPending.length ? Buffer.concat([openaiPending, chunk]) : chunk;
+      const lastIdx = combined.lastIndexOf("\n\n");
+      if (lastIdx === -1) {
+        openaiPending = combined;
+        chunk = Buffer.alloc(0);
+      } else {
+        const readyEnd = lastIdx + 2;
+        const ready = combined.subarray(0, readyEnd);
+        openaiPending = combined.subarray(readyEnd);
+        const hasBadFrame =
+          ready.includes(Buffer.from("data: null")) ||
+          ready.includes(Buffer.from("data:null")) ||
+          ready.includes(Buffer.from("data:\n"));
+        if (hasBadFrame) {
+          const readyText = ready.toString("utf8");
+          const cleaned = readyText
+            .split("\n")
+            .filter((line) => {
+              const t = line.trim();
+              return t !== "data: null" && t !== "data:null" && t !== "data:";
+            })
+            .join("\n");
+          if (cleaned !== readyText) {
+            logDebug(`dropped invalid data: keepalive frame(s), ${ready.length} -> ${cleaned.length} bytes`);
+            chunk = Buffer.from(cleaned, "utf8");
+          } else {
+            chunk = ready;
+          }
+        } else {
+          chunk = ready;
+        }
       }
     }
 
     const canContinue = safeWrite(chunk);
     if (canContinue === false && !res.writableEnded) {
       if (res.socket?.destroyed || res.destroyed) {
-        endWithEom();
+        endWithEom("client_disconnected");
+        if (!upstreamReq.destroyed) upstreamReq.destroy();
         finishStream();
       } else {
         upstreamRes.pause();
@@ -268,9 +353,42 @@ export function pipeSse({
     }
   });
 
+  // Client aborted: tear down the upstream immediately instead of waiting for
+  // the next upstream chunk or the stall watchdog.
+  res.on("close", () => {
+    if (streamFinished) return;
+    if (!upstreamReq.destroyed) upstreamReq.destroy();
+  });
+
   upstreamRes.on("end", () => {
     if (streamFinished) return;
+    // Upstream ended while a `<think>` span was still open: those bytes were
+    // withheld from the client (never forwarded), so silently reporting 200
+    // would be silent truncation. Surface it as a 502 with an error frame.
+    if (thinkBuf.length) {
+      thinkBuf = Buffer.alloc(0);
+      log(`UPSTREAM ENDED MID-SPAN (unterminated thinking tag, ${chunkCount} chunks)`);
+      onResult({ statusCode: 502, durationMs: Date.now() - reqStart, chunks: chunkCount, error: "upstream_ended_mid_frame" });
+      endWithEom("upstream_ended_mid_frame");
+      finishStream();
+      return;
+    }
     flushCarry();
+    // Upstream ended cleanly with a trailing `<think>` tag prefix still held
+    // back: forward it so no bytes are lost (verbatim-streaming contract).
+    // It never completed into a real tag, so it is legitimate content.
+    if (tagPrefixPending.length) {
+      safeWrite(tagPrefixPending);
+      tagPrefixPending = Buffer.alloc(0);
+    }
+    // Upstream ended cleanly while an OpenAI tail frame was pending: forward it
+    // so no bytes are lost (verbatim-streaming contract). Abnormal paths below
+    // drop the partial frame instead — a half frame before a synthetic
+    // finisher would corrupt the client's parser.
+    if (openaiPending.length) {
+      safeWrite(openaiPending);
+      openaiPending = Buffer.alloc(0);
+    }
     if (isSse && !sawDataEvent) {
       log(`EMPTY SSE STREAM (${chunkCount} chunks)`);
       onDegrade("empty_sse");
@@ -286,20 +404,22 @@ export function pipeSse({
   upstreamRes.on("error", (e) => {
     if (streamFinished) return;
     flushCarry();
+    openaiPending = Buffer.alloc(0);
     const causeCode = e.cause?.code ? ` (cause: ${e.cause.code})` : "";
     log(`UPSTREAM STREAM ERROR: ${e.message}${causeCode}`);
     onResult({ statusCode: 502, durationMs: Date.now() - reqStart, chunks: chunkCount, error: e.message });
-    endWithEom();
+    endWithEom("upstream_stream_error");
     finishStream();
   });
 
   upstreamRes.on("close", () => {
     if (streamFinished) return;
     flushCarry();
+    openaiPending = Buffer.alloc(0);
     if (!res.writableEnded) {
       log(`UPSTREAM CLOSED (connection terminated prematurely, ${Date.now() - reqStart}ms, ${chunkCount} chunks)`);
       onResult({ statusCode: 502, durationMs: Date.now() - reqStart, chunks: chunkCount, error: "upstream_closed" });
-      endWithEom();
+      endWithEom("upstream_closed");
     }
     finishStream();
   });

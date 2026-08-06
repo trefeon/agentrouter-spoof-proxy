@@ -73,7 +73,7 @@ Wait 5 seconds if `wafCookie: false` — WAF warmup runs at startup.
 | **WAF bypass** | Spoofs Claude Code CLI headers + maintains `acw_tc` cookies |
 | **SSE streaming** | Pipes with backpressure + keepalives; format-aware EOM; never cuts live streams |
 | **Retry logic** | Auto-retry on transport errors with exponential backoff; 5xx retry configurable (`RETRY_ON_5XX`) |
-| **Thinking tag stripping** | Strips `<think>...</think>` tags from Claude responses (`STRIP_THINKING_TAGS`) |
+| **Thinking tag stripping** | Strips `<think>...</think>` from OpenAI-format SSE streams; Anthropic-format thinking blocks pass through (`STRIP_THINKING_TAGS`) |
 | **Model-aware headers** | Anthropic headers for `/v1/messages`, generic headers for `/v1/chat/completions` |
 | **Circuit breaker** | Opens after 5 consecutive final 5xx/transport failures, progressive cooldown |
 | **Auto model health** | Failing models removed from `/v1/models` → 9Router falls back instantly |
@@ -117,12 +117,12 @@ All values have defaults — copy `.env.example` to `.env` only if you need to c
 | `TARGET_HOST` | `agentrouter.org` | Upstream host |
 | `REQUEST_TIMEOUT_MS` | `300000` | Request timeout (5min) |
 | `RESPONSE_TIMEOUT_MS` | `30000` | Wait for upstream response headers before 504/retry |
-| `SSE_IDLE_TIMEOUT_MS` | `600000` | Terminate stream after no SSE events (dead upstream) |
+| `SSE_IDLE_TIMEOUT_MS` | `600000` | Terminate stream after no SSE events (dead upstream) (OpenAI-format upstreams send no liveness pings — a genuinely silent reasoning pause approaching this timeout is cut; raise it for long-thinking OpenAI models) |
 | `SSE_CHUNK_TIMEOUT_MS` | `30000` | Stall watchdog — reports slow streams, keeps alive while connected |
 | `BODY_UPLOAD_TIMEOUT_MS` | `60000` | Reject stalled uploads with 408 |
 | `MAX_RETRIES` | `2` | Retry count for transport errors |
 | `RETRY_ON_5XX` | `false` | Also retry on 5xx responses (⚠️ causes double token billing) |
-| `STRIP_THINKING_TAGS` | `true` | Strip `<think>...</think>` from SSE text content |
+| `STRIP_THINKING_TAGS` | `true` | Strip `<think>...</think>` from OpenAI-format SSE text; Anthropic-format thinking blocks pass through |
 | `AR_API_KEY` | _(empty)_ | Enable dynamic model discovery |
 | `INJECT_SYSTEM_PROMPT` | _(empty)_ | System prompt injected into requests |
 | `SLOW_RESPONSE_MS` | `30000` | Temporarily degrades models with slow successful streams |
@@ -150,8 +150,14 @@ causes Claude to return thinking content blocks. When downstream clients don't u
 these blocks, thinking content leaks as raw `<think>...</think>` tags in text output.
 
 With `STRIP_THINKING_TAGS=true` (default), the proxy strips `<think>...</think>` tags
-from SSE response text before forwarding to the client. Tags that span multiple SSE
-chunks are handled correctly. Set to `false` if your client supports thinking content.
+from **OpenAI-format** (`/v1/chat/completions`) SSE text before forwarding to the
+client — OpenAI clients cannot render thinking blocks. Tags and their content are handled even when they span multiple SSE
+chunks or are split mid-tag at a chunk boundary, and multi-byte UTF-8 content is never corrupted.
+**Anthropic-format** (`/v1/messages`) thinking blocks always pass through untouched:
+harness clients (opencode, OpenClaw, claude-code) render thinking natively, and
+stripping it there would remove reasoning and create silent gaps that trigger
+client-side idle watchdogs. Set to `false` if your OpenAI client supports thinking
+content.
 
 ### Model-aware headers
 
@@ -212,10 +218,10 @@ proxy.mjs (~166 lines, thin entry: routing allowlist + inbound auth + lifecycle)
 > Runtime is zero-dependency. The scripts below use `oxlint` + the built-in `node:test` runner; run `npm install` once (devDependencies only) to use them.
 
 ```bash
-# Everything (121 unit + 55 E2E + 7 issue-verification = 183 tests, exits cleanly)
+# Everything (129 unit + 55 E2E + 7 issue-verification = 191 tests, exits cleanly)
 npm test
 
-# Fast unit tests — pure functions + SSE pump, no long-lived processes (121 tests)
+# Fast unit tests — pure functions + SSE pump, no long-lived processes (129 tests)
 npm run test:unit
 
 # E2E tests — spawns proxy + mock upstream (55 tests, ~75s)
