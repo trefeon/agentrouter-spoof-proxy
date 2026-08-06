@@ -236,6 +236,32 @@ describe("unit: pipeSse", () => {
     assert.equal(h.events.finished, 1);
   });
 
+  it("OpenAI format: data: null keepalive frames are dropped", async () => {
+    const h = makeHarness({ streamFormat: "openai" });
+    h.upstreamRes.write(`data: {"id":"chatcmpl-abc","choices":[{"delta":{"content":"hi"}}]}\n\n`);
+    h.upstreamRes.write("data: null\n\n");
+    h.upstreamRes.write(`data: {"id":"chatcmpl-abc","choices":[{"delta":{"content":" there"}}]}\n\n`);
+    h.upstreamRes.write(`${SSE_DONE}\n\n`);
+    h.upstreamRes.end();
+    await sleep(20);
+    assert.equal(h.body.includes("data: null"), false, "data:null keepalive must be stripped");
+    assert.equal(h.body.includes('"content":"hi"'), true, "real chunk must pass through");
+    assert.equal(h.body.includes('"content":" there"'), true, "chunk after keepalive must pass through");
+    assert.equal(h.body.includes(SSE_DONE), true, "[DONE] must remain");
+    assert.equal(h.events.finished, 1);
+  });
+
+  it("OpenAI format: data: null frame interleaved inside a single chunk is dropped", async () => {
+    const h = makeHarness({ streamFormat: "openai" });
+    h.upstreamRes.write(`data: {"id":"a","choices":[{"delta":{"content":"x"}}]}\n\ndata: null\n\ndata: {"id":"a","choices":[{"delta":{"content":"y"}}]}\n\n${SSE_DONE}\n\n`);
+    h.upstreamRes.end();
+    await sleep(20);
+    assert.equal(h.body.includes("data: null"), false);
+    assert.equal(h.body.includes('"content":"x"'), true);
+    assert.equal(h.body.includes('"content":"y"'), true);
+    assert.equal(h.events.finished, 1);
+  });
+
   it("OpenAI format: premature close injects data: [DONE] EOM", async () => {
     const h = makeHarness({ streamFormat: "openai" });
     h.upstreamRes.write(`data: {"content":"partial answer..."}\n\n`);

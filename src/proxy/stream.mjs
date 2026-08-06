@@ -239,6 +239,23 @@ export function pipeSse({
       chunk = Buffer.from(result, "utf8");
     }
 
+    // AgentRouter (new-api) emits bare `data: null` frames as keepalive/
+    // separators on reasoning-model streams. OpenAI SDK and AI SDK clients
+    // validate every `data:` line as a chunk object, so a JSON `null` payload
+    // fails with "Type validation failed: Value: null". Drop those frames from
+    // OpenAI streams before they reach the client.
+    if (isSse && streamFormat === "openai" && chunkText.includes("data: null")) {
+      const cleaned = chunk
+        .toString("utf8")
+        .split("\n")
+        .filter((line) => line.trim() !== "data: null")
+        .join("\n");
+      if (cleaned.length !== chunk.length) {
+        logDebug(`dropped data:null keepalive frame(s), ${chunk.length} -> ${cleaned.length} bytes`);
+        chunk = Buffer.from(cleaned, "utf8");
+      }
+    }
+
     const canContinue = safeWrite(chunk);
     if (canContinue === false && !res.writableEnded) {
       if (res.socket?.destroyed || res.destroyed) {
