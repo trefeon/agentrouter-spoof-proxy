@@ -22,6 +22,7 @@ docker-compose.override.yml
 # Internal agent state & temporary directories
 .agents/
 .engram/
+.jules/
 .system_generated/
 scratch/
 
