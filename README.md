@@ -212,13 +212,13 @@ proxy.mjs (~166 lines, thin entry: routing allowlist + inbound auth + lifecycle)
 > Runtime is zero-dependency. The scripts below use `oxlint` + the built-in `node:test` runner; run `npm install` once (devDependencies only) to use them.
 
 ```bash
-# Everything (97 unit + 51 E2E + 7 issue-verification = 155 tests, exits cleanly)
+# Everything (121 unit + 55 E2E + 7 issue-verification = 183 tests, exits cleanly)
 npm test
 
-# Fast unit tests — pure functions + SSE pump, no long-lived processes (97 tests)
+# Fast unit tests — pure functions + SSE pump, no long-lived processes (121 tests)
 npm run test:unit
 
-# E2E tests — spawns proxy + mock upstream (51 tests, ~25s)
+# E2E tests — spawns proxy + mock upstream (55 tests, ~75s)
 npm run test:e2e
 
 # Issue-verification regression tests (7 tests)

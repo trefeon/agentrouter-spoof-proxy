@@ -78,7 +78,7 @@ Expected: `"ok":true,"wafCookie":true`
 | `tests/unit/stream.test.mjs` | Unit tests: SSE pump (real sockets, framing, keepalives) |
 | `tests/unit/resilience.test.mjs` | Unit tests: circuit breaker + config validation |
 | `tests/unit/models.test.mjs` | Unit tests: health, stats, discovery, routing helpers |
-| `tests/proxy.test.mjs` | 51 E2E tests |
+| `tests/proxy.test.mjs` | 55 E2E tests |
 | `tests/verify-issues.test.mjs` | 7 issue-verification regression tests |
 | `package.json` | Scripts: `test`, `test:unit`, `test:e2e`, `test:verify`, `coverage`, `lint`, `check` (oxlint devDep only) |
 | `docs/panduan-9router.md` | 🇮🇩 Indonesian tutorial (Bahasa Indonesia) |
