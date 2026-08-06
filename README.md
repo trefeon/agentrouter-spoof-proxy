@@ -2,7 +2,7 @@
 
 Lightweight Node.js reverse proxy that bypasses AgentRouter WAF by spoofing Claude Code headers. Zero runtime dependencies — thin modular entry + 13 focused modules, 120MB Docker image.
 
-> 🇮🇩 **[Panduan 9Router Bahasa Indonesia](docs/panduan-9router.md)** — Tutorial lengkap untuk teman-teman Indonesia.
+> 🇮🇩 **[Panduan 9Router (Bahasa Indonesia)](docs/panduan-9router.md)** — Indonesian tutorial for integrating with 9Router.
 
 ---
 
@@ -59,7 +59,7 @@ Wait 5 seconds if `wafCookie: false` — WAF warmup runs at startup.
    - **API Type:** `chat completions`
    - **Base URL:** `http://localhost:8318/v1` (or `http://172.18.0.3:8318/v1` if Docker-to-Docker)
 3. Click **Import from /models**
-4. **Add API Key** → paste your AgentRouter API key (simpan di 9Router aja, bukan di proxy)
+4. **Add API Key** → paste your AgentRouter API key (store it only in 9Router, not in the proxy)
 5. Model will appear as `AG-gpt-5.6-sol`, `AG-claude-opus-5`, etc.
 
 > Windows Docker Desktop: use `http://host.docker.internal:8318/v1`
@@ -247,28 +247,28 @@ Zero runtime dependencies — everything above is built-in Node (or `oxlint` as 
 
 ---
 
-## Tanya-Jawab (FAQ)
+## FAQ
 
-**Q: Kenapa Claude model kadang error 500?**
-A: Bukan bug proxy. Upstream agentrouter.org kadang Go panic buat Claude models. Proxy punya **auto model health** — model error langsung dihapus dari `/v1/models` dan 9Router otomatis fallback ke model lain. Recovery probe tiap 60 detik. Progressive cooldown: 30s → 1m → 2m → 5m → 10m.
+**Q: Why do Claude models sometimes return 500?**
+A: Not a proxy bug. The agentrouter.org upstream occasionally Go-panics for Claude models. The proxy has **auto model health** — a failing model is removed from `/v1/models` immediately and 9Router falls back to another model automatically. Recovery probe every 60 seconds. Progressive cooldown: 30s → 1m → 2m → 5m → 10m.
 
-**Q: Streaming sering putus / kena cut di tengah jawaban?**
-A: Sejak hardening, proxy tidak pernah motong stream yang masih hidup — kalau upstream masih nyambung, stall watchdog cuma di-reset (aman untuk thinking panjang / tool use). Stream hanya berakhir kalau: upstream selesai, error, client disconnect, atau benar-benar idle (tidak ada event sama sekali) melebihi `SSE_IDLE_TIMEOUT_MS` (default 10 menit). Kalau masih kepotong, cek log proxy untuk `SLOW STREAM` / `IDLE TIMEOUT` dan sesuaikan `SSE_CHUNK_TIMEOUT_MS` / `SSE_IDLE_TIMEOUT_MS`.
+**Q: Streaming keeps disconnecting / getting cut mid-answer?**
+A: Since the hardening, the proxy never cuts a stream that is still alive — as long as the upstream is connected, the stall watchdog only resets (safe for long thinking / tool use). A stream only ends when: the upstream finishes, an error occurs, the client disconnects, or the stream is truly idle (no events at all) beyond `SSE_IDLE_TIMEOUT_MS` (default 10 minutes). If streams still get cut, check the proxy logs for `SLOW STREAM` / `IDLE TIMEOUT` and adjust `SSE_CHUNK_TIMEOUT_MS` / `SSE_IDLE_TIMEOUT_MS`.
 
-**Q: OpenAI / chat completions dapat error "Expected 'id' to be a string"?**
-A: Sudah diperbaiki. Terminal event sekarang format-aware: stream `/v1/chat/completions` diakhiri `data: [DONE]`, bukan `event: message_stop` dari format Anthropic.
+**Q: OpenAI / chat completions gives error "Expected 'id' to be a string"?**
+A: Fixed. Terminal events are now format-aware: `/v1/chat/completions` streams end with `data: [DONE]`, not the Anthropic-format `event: message_stop`.
 
-**Q: Request body gede banget (>20MB)?**
-A: Ditolak bersih dengan HTTP `413 payload_too_large` — body-nya gak pernah diteruskan ke upstream. Upload yang macet juga diputus dengan `408` setelah `BODY_UPLOAD_TIMEOUT_MS`.
+**Q: Request body too large (>20MB)?**
+A: Rejected cleanly with HTTP `413 payload_too_large` — the body is never forwarded upstream. Stalled uploads are also cut with `408` after `BODY_UPLOAD_TIMEOUT_MS`.
 
-**Q: API key disimpen dimana?**
-A: **Di 9Router aja**, bukan di proxy. Proxy cuma spoof header, ga nyimpen credential. Kalau proxy di-expose (bukan localhost), set `PROXY_AUTH_TOKEN` dan isi di 9Router sebagai Bearer token.
+**Q: Where is the API key stored?**
+A: **Only in 9Router**, not in the proxy. The proxy only spoofs headers and stores no credentials. If the proxy is exposed (not localhost), set `PROXY_AUTH_TOKEN` and fill it in 9Router as a Bearer token.
 
 **Q: WAF cookie expired?**
-A: Proxy refresh otomatis tiap 3 menit via warmup. Kalau kena 403 WAF mid-request, auto re-warmup & retry.
+A: The proxy refreshes it automatically every 3 minutes via warmup. If a 403 WAF block happens mid-request, it auto re-warms and retries.
 
-**Q: Bisa tanpa 9Router?**
-A: Bisa. `curl` langsung ke `http://localhost:8318/v1/messages` dengan API key agentrouter.
+**Q: Can I use it without 9Router?**
+A: Yes. `curl` directly to `http://localhost:8318/v1/messages` with your agentrouter API key.
 
 ---
 
