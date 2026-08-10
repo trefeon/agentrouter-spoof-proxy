@@ -43,7 +43,7 @@ curl http://localhost:8318/health
 ```
 
 ```json
-{"ok":true,"upstream":"agentrouter.org:443","availableModels":3,"activeStreams":0,"wafCookie":true,"circuitOpen":false}
+{"ok":true,"upstream":"agentrouter.org:443","modelSource":"static","staticModels":3,"availableModels":3,"activeStreams":0,"wafCookie":true,"circuitOpen":false,"consecutiveFails":0,"modelHealth":[]}
 ```
 
 Wait 5 seconds if `wafCookie: false` — WAF warmup runs at startup.
@@ -75,7 +75,7 @@ Wait 5 seconds if `wafCookie: false` — WAF warmup runs at startup.
 | **Retry logic** | Auto-retry on transport errors with exponential backoff; 5xx retry configurable (`RETRY_ON_5XX`) |
 | **Thinking tag stripping** | Strips `<think>...</think>` from OpenAI-format SSE streams; Anthropic-format thinking blocks pass through (`STRIP_THINKING_TAGS`) |
 | **Model-aware headers** | Anthropic headers for `/v1/messages`, generic headers for `/v1/chat/completions` |
-| **Circuit breaker** | Opens after 5 consecutive final 5xx/transport failures, progressive cooldown |
+| **Circuit breaker** | Opens after 5 consecutive final 5xx/transport failures, exponential cooldown capped at 600s |
 | **Auto model health** | Failing models removed from `/v1/models` → 9Router falls back instantly |
 | **Model recovery** | Background probe every 60s with spoof headers + WAF cookie |
 | **Prompt injection** | Optional system prompt injection (`INJECT_SYSTEM_PROMPT`) |
@@ -114,16 +114,22 @@ All values have defaults — copy `.env.example` to `.env` only if you need to c
 | `LISTEN_PORT` | `8318` | Proxy port |
 | `LISTEN_ADDRESS` | `127.0.0.1` | Bind address. Set `0.0.0.0` only for Docker-to-Docker/remote (with `PROXY_AUTH_TOKEN`) |
 | `PROXY_AUTH_TOKEN` | _(empty)_ | Optional inbound auth — required header `Authorization: Bearer` or `X-Proxy-Token` |
+| `TARGET_PROTOCOL` | `https` | Upstream protocol |
 | `TARGET_HOST` | `agentrouter.org` | Upstream host |
+| `TARGET_PORT` | `443` | Upstream port |
+| `WARMUP_INTERVAL_MS` | `180000` | WAF cookie warmup interval (3 min) |
 | `REQUEST_TIMEOUT_MS` | `300000` | Request timeout (5min) |
 | `RESPONSE_TIMEOUT_MS` | `30000` | Wait for upstream response headers before 504/retry |
 | `SSE_IDLE_TIMEOUT_MS` | `600000` | Terminate stream after no SSE events (dead upstream) (OpenAI-format upstreams send no liveness pings — a genuinely silent reasoning pause approaching this timeout is cut; raise it for long-thinking OpenAI models) |
 | `SSE_CHUNK_TIMEOUT_MS` | `30000` | Stall watchdog — reports slow streams, keeps alive while connected |
 | `BODY_UPLOAD_TIMEOUT_MS` | `60000` | Reject stalled uploads with 408 |
-| `MAX_RETRIES` | `2` | Retry count for transport errors |
+| `MAX_RETRIES` | `2` | Retry count for transport errors (3 attempts total) |
+| `RETRY_DELAY_MS` | `1000` | Base backoff delay — actual delay is `RETRY_DELAY_MS × 2^attempt` |
 | `RETRY_ON_5XX` | `false` | Also retry on 5xx responses (⚠️ causes double token billing) |
 | `STRIP_THINKING_TAGS` | `true` | Strip `<think>...</think>` from OpenAI-format SSE text; Anthropic-format thinking blocks pass through |
+| `MODELS_CSV` | `gpt-5.6-sol,claude-opus-5,claude-opus-4-8` | Static fallback model list (used when `AR_API_KEY` is not set) |
 | `AR_API_KEY` | _(empty)_ | Enable dynamic model discovery |
+| `DISCOVERY_INTERVAL_MS` | `600000` | Dynamic model discovery refresh interval |
 | `INJECT_SYSTEM_PROMPT` | _(empty)_ | System prompt injected into requests |
 | `SLOW_RESPONSE_MS` | `30000` | Temporarily degrades models with slow successful streams |
 | `LOG_LEVEL` | `info` | `info` or `debug` |
@@ -133,8 +139,9 @@ See `.env.example` for the full list.
 ### Retry behavior and token billing
 
 By default (`RETRY_ON_5XX=false`), the proxy only retries on **transport-level errors**
-(timeout, ECONNRESET, socket hang up, ETIMEDOUT). HTTP 5xx responses from the upstream
-are forwarded to the client immediately.
+(timeout, socket hang up, ECONNRESET, ETIMEDOUT, ENETUNREACH), up to `MAX_RETRIES=2`
+(3 attempts total) with an exponential delay of `RETRY_DELAY_MS × 2^attempt`. HTTP 5xx
+responses from the upstream are forwarded to the client immediately.
 
 When `RETRY_ON_5XX=true`, the proxy also retries on 5xx responses. **Warning:** each
 retry re-sends the full request body to the upstream, which means the upstream counts
@@ -153,7 +160,8 @@ With `STRIP_THINKING_TAGS=true` (default), the proxy strips `<think>...</think>`
 from **OpenAI-format** (`/v1/chat/completions`) SSE text before forwarding to the
 client — OpenAI clients cannot render thinking blocks. Tags and their content are handled even when they span multiple SSE
 chunks or are split mid-tag at a chunk boundary, and multi-byte UTF-8 content is never corrupted.
-**Anthropic-format** (`/v1/messages`) thinking blocks always pass through untouched:
+If the upstream ends while a thinking span is still open, the stream ends with a `502` error frame
+rather than leaking raw tags. **Anthropic-format** (`/v1/messages`) thinking blocks always pass through untouched:
 harness clients (opencode, OpenClaw, claude-code) render thinking natively, and
 stripping it there would remove reasoning and create silent gaps that trigger
 client-side idle watchdogs. Set to `false` if your OpenAI client supports thinking
@@ -164,8 +172,8 @@ content.
 The proxy applies different spoof headers based on the request format:
 - **`/v1/messages`** (Anthropic): full Claude Code headers including `Anthropic-Beta`,
   `Anthropic-Version`, etc.
-- **`/v1/chat/completions`** (OpenAI): generic headers only (User-Agent, Content-Type,
-  Authorization) — no Anthropic-specific headers are sent
+- **`/v1/chat/completions`** (OpenAI): generic `claude-cli` User-Agent + `X-Stainless-*`
+  headers only — no `anthropic-*` headers are sent
 
 The proxy owns the canonical `Anthropic-Version`/`Anthropic-Beta` spoof values — a
 client-supplied `anthropic-version` on `/v1/messages` is intentionally ignored so the
@@ -218,10 +226,10 @@ proxy.mjs (~166 lines, thin entry: routing allowlist + inbound auth + lifecycle)
 > Runtime is zero-dependency. The scripts below use `oxlint` + the built-in `node:test` runner; run `npm install` once (devDependencies only) to use them.
 
 ```bash
-# Everything (129 unit + 55 E2E + 7 issue-verification = 191 tests, exits cleanly)
+# Everything (132 unit + 55 E2E + 7 issue-verification = 194 tests, exits cleanly)
 npm test
 
-# Fast unit tests — pure functions + SSE pump, no long-lived processes (129 tests)
+# Fast unit tests — pure functions + SSE pump, no long-lived processes (132 tests)
 npm run test:unit
 
 # E2E tests — spawns proxy + mock upstream (55 tests, ~75s)

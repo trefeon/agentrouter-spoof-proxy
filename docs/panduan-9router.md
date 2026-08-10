@@ -129,10 +129,15 @@ Hasil yang diharapkan:
 ```json
 {
   "ok": true,
+  "upstream": "agentrouter.org:443",
+  "modelSource": "static",
+  "staticModels": 3,
+  "availableModels": 3,
+  "activeStreams": 0,
   "wafCookie": true,
   "circuitOpen": false,
-  "modelSource": "static",
-  "availableModels": 3
+  "consecutiveFails": 0,
+  "modelHealth": []
 }
 ```
 

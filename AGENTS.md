@@ -39,7 +39,7 @@ node proxy.mjs                   # Direct (foreground)
 curl http://localhost:8318/health
 ```
 
-Expected: `"ok":true,"wafCookie":true`
+Expected: `{"ok":true,"upstream":"agentrouter.org:443","modelSource":"static","staticModels":3,"availableModels":3,"activeStreams":0,"wafCookie":true,"circuitOpen":false,"consecutiveFails":0,"modelHealth":[]}`
 
 ---
 
