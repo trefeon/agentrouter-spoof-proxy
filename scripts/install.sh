@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# SECURITY NOTE: this installer downloads and executes remote code over TLS
+# (GitHub, NodeSource, get.docker.com). Review the script before piping it
+# from the internet: https://github.com/trefeon/agentrouter-spoof-proxy/blob/main/scripts/install.sh
+
 # AgentRouter Spoof Proxy - Linux One-Line Installer
 #
 # Usage:
@@ -183,8 +187,15 @@ ensure_node() {
 
 ensure_docker() {
   if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    ok "Docker available"
-    return 0
+    if docker compose version >/dev/null 2>&1; then
+      ok "Docker available"
+      return 0
+    fi
+    warn "Docker daemon is running but the compose plugin is missing."
+    if install_packages "$(detect_pm)" docker-compose-plugin; then
+      return 0
+    fi
+    return 1
   fi
 
   warn "Docker is not available or the daemon is not running."
@@ -199,7 +210,7 @@ ensure_docker() {
           info "DRY-RUN: curl https://get.docker.com | sh"
         else
           curl -fsSL https://get.docker.com | sudo sh
-          sudo usermod -aG docker "$USER" || true
+          sudo usermod -aG docker "$(id -un)" || true
           warn "If Docker was just installed, log out/in or run: newgrp docker"
         fi
         return 0
@@ -256,6 +267,10 @@ resolve_project_dir() {
 
   run mkdir -p "$(dirname "$INSTALL_DIR")"
   if command -v git >/dev/null 2>&1; then
+    if [ -d "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]; then
+      confirm "Directory $INSTALL_DIR is not empty. Remove it and clone fresh?" || { err "Aborting: $INSTALL_DIR is not empty."; exit 1; }
+      run rm -rf "$INSTALL_DIR"
+    fi
     run git clone "$REPO_URL" "$INSTALL_DIR"
     PROJECT_DIR="$INSTALL_DIR"
     return 0
@@ -267,12 +282,20 @@ resolve_project_dir() {
   if $DRY_RUN; then
     info "DRY-RUN: download and extract $TARBALL_URL to $INSTALL_DIR"
   else
-    local tmp
+    local tmp top=""
     tmp="$(mktemp -d)"
     curl -fsSL "$TARBALL_URL" -o "$tmp/source.tar.gz"
     tar -xzf "$tmp/source.tar.gz" -C "$tmp"
+    for entry in $(tar -tzf "$tmp/source.tar.gz" 2>/dev/null); do
+      top="${entry%%/*}"
+      break
+    done
+    [ -n "$top" ] || { err "Cannot determine archive root directory"; rm -rf "$tmp"; exit 1; }
+    if [ -d "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]; then
+      confirm "Remove existing non-empty directory $INSTALL_DIR and install fresh?" || { err "Aborting: $INSTALL_DIR is not empty."; exit 1; }
+    fi
     rm -rf "$INSTALL_DIR"
-    mv "$tmp/agentrouter-spoof-proxy-main" "$INSTALL_DIR"
+    mv "$tmp/$top" "$INSTALL_DIR"
     rm -rf "$tmp"
   fi
   PROJECT_DIR="$INSTALL_DIR"
@@ -371,7 +394,14 @@ info "AgentRouter Spoof Proxy Installer"
 if $DRY_RUN; then warn "Dry-run mode enabled; no changes will be made."; fi
 
 resolve_project_dir
-cd "$PROJECT_DIR"
+if [ -d "$PROJECT_DIR" ]; then
+  cd "$PROJECT_DIR"
+elif $DRY_RUN; then
+  info "DRY-RUN: project would be at $PROJECT_DIR (not created in dry-run)"
+else
+  err "Project directory $PROJECT_DIR is missing."
+  exit 1
+fi
 info "Project dir: $PROJECT_DIR"
 
 pick_method

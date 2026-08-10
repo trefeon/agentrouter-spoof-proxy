@@ -1,8 +1,13 @@
 # AgentRouter Spoof Proxy — Windows One-Click Installer
+# SECURITY NOTE: this installer downloads and executes remote code over TLS
+# (GitHub, NodeSource, Docker Desktop). Review the script before piping it
+# from the internet: https://github.com/trefeon/agentrouter-spoof-proxy/blob/main/scripts/install.ps1
 #
 # Usage:
 #   iwr -useb https://raw.githubusercontent.com/trefeon/agentrouter-spoof-proxy/main/scripts/install.ps1 | iex
-#   iwr -useb https://raw.githubusercontent.com/trefeon/agentrouter-spoof-proxy/main/scripts/install.ps1 | iex "args"
+#     (interactive - prompts for run method; parameters cannot be passed through the pipe)
+#   Invoke-WebRequest -Uri <script-url> -OutFile install.ps1; .\install.ps1 -Docker -Yes
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -PM2 -DryRun
 #
 # Parameters:
 #   -Docker         Run with Docker Compose
@@ -18,6 +23,7 @@ param(
   [switch]$Direct,
   [switch]$Yes,
   [switch]$DryRun,
+  [switch]$Help,
   [string]$InstallDir = "$env:USERPROFILE\agentrouter-spoof-proxy"
 )
 
@@ -29,7 +35,7 @@ $method = ""
 function Write-Info  { Write-Host "[INFO]  $args" -ForegroundColor Cyan }
 function Write-OK    { Write-Host "[OK]    $args" -ForegroundColor Green }
 function Write-Warn  { Write-Host "[WARN]  $args" -ForegroundColor Yellow }
-function Write-Error { Write-Host "[ERROR] $args" -ForegroundColor Red }
+function Write-Fail { Write-Host "[ERROR] $args" -ForegroundColor Red }
 
 function Run-Step {
   param([string]$Desc, [scriptblock]$Block)
@@ -37,7 +43,10 @@ function Run-Step {
     Write-Info "DRY-RUN: $Desc"
     return
   }
+  Write-Info "Running: $Desc"
+  $LASTEXITCODE = 0
   & $Block
+  if ($LASTEXITCODE -ne 0) { throw "$Desc failed with exit code $LASTEXITCODE" }
 }
 
 function Confirm-Step {
@@ -55,30 +64,54 @@ Write-Info "--------------------------------------------"
 Write-Host ""
 if ($DryRun) { Write-Warn "Dry-run mode enabled; no changes will be made." }
 
+if ($Help) {
+  Write-Host "AgentRouter Spoof Proxy installer"
+  Write-Host ""
+  Write-Host "Usage: .\install.ps1 [-Docker | -PM2 | -Direct] [-Yes] [-DryRun] [-InstallDir <path>] [-Help]"
+  Write-Host ""
+  Write-Host "  -Docker       Run with Docker Compose"
+  Write-Host "  -PM2          Run with PM2 on host"
+  Write-Host "  -Direct       Run with node in foreground"
+  Write-Host "  -Yes          Non-interactive mode"
+  Write-Host "  -DryRun       Print what would happen without changing the system"
+  Write-Host "  -InstallDir   Install directory (default: ~\agentrouter-spoof-proxy)"
+  exit 0
+}
+
 # ── Detect Node.js ──
-$nodeOk = $false
-try {
-  $nodeVer = (node -v) -replace 'v',''
-  $verParts = $nodeVer -split '\.'
-  if ([int]$verParts[0] -lt 22) {
-    Write-Warn "Node.js $nodeVer found. Recommended 22+. Continuing anyway."
-  } else {
-    Write-OK "Node.js $nodeVer"
-  }
-  $nodeOk = $true
-} catch {
+function Test-Node {
+  try {
+    $nodeVer = (node -v) -replace '^v',''
+    $verParts = $nodeVer -split '\.'
+    if ([int]$verParts[0] -lt 22) {
+      Write-Warn "Node.js $nodeVer found. Recommended 22+. Continuing anyway."
+    } else {
+      Write-OK "Node.js $nodeVer"
+    }
+    return $true
+  } catch { return $false }
+}
+
+$nodeOk = Test-Node
+if (-not $nodeOk) {
   Write-Warn "Node.js not found."
   if ($Yes) {
     Write-Info "Attempting install via winget..."
-    Run-Step "winget install OpenJS.NodeJS.LTS" { winget install OpenJS.NodeJS.LTS -e --accept-source-agreements }
-    try { node --version | Out-Null; $nodeOk = $true } catch {}
+    Run-Step "winget install OpenJS.NodeJS.LTS" { winget install OpenJS.NodeJS.LTS -e --accept-source-agreements --accept-package-agreements }
+    # winget updates the registry PATH; the current session's $env:Path is stale.
+    $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+    $nodeOk = Test-Node
+    if (-not $nodeOk) {
+      Write-Fail "Node.js was installed but is not on PATH yet. Open a new terminal and rerun the installer."
+      pause; exit 1
+    }
   } else {
     Write-Host "  Install: https://nodejs.org (LTS, 22+)"
     Write-Host "  Or: winget install OpenJS.NodeJS.LTS"
   }
 }
 if (-not $nodeOk -and -not $DryRun) {
-  Write-Error "Node.js is required."
+  Write-Fail "Node.js is required."
   pause; exit 1
 }
 
@@ -94,34 +127,54 @@ try {
 if (Test-Path (Join-Path $InstallDir "proxy.mjs")) {
   Write-Info "Found project at $InstallDir"
   Set-Location $InstallDir
+  if (Test-Path ".git") {
+    Run-Step "git pull --ff-only" { git pull --ff-only }
+  }
 } elseif (Test-Path "proxy.mjs") {
   $InstallDir = (Get-Location).Path
 } else {
   Write-Info "Installing to $InstallDir"
 
-  if (-not (Test-Path $InstallDir)) {
-    try {
-      git --version | Out-Null
-      $hasGit = $true
-    } catch { $hasGit = $false }
+  if (-not (Test-Path (Join-Path $InstallDir "proxy.mjs"))) {
+    if (Test-Path $InstallDir) {
+      if ((Get-ChildItem -Force $InstallDir | Measure-Object).Count -gt 0) {
+        if (Confirm-Step "Directory $InstallDir is not empty. Remove it and install fresh?") {
+          Run-Step "Remove existing $InstallDir" { Remove-Item -Recurse -Force $InstallDir }
+        } else {
+          Write-Fail "Aborting: $InstallDir is not empty."
+          pause; exit 1
+        }
+      }
+    }
+
+    try { git --version | Out-Null; $hasGit = $true } catch { $hasGit = $false }
 
     if ($hasGit) {
       Run-Step "git clone $repo $InstallDir" { git clone $repo $InstallDir }
     } else {
       Write-Warn "Git not found. Downloading tarball instead..."
-      Run-Step "Download and extract tarball to $InstallDir" {
-        $tmp = "$env:TEMP\agentrouter-install"
+      $tmp = "$env:TEMP\agentrouter-install"
+      Run-Step "Download and extract tarball to $tmp" {
         New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-        $tarballPath = "$tmp\source.tar.gz"
-        Invoke-WebRequest -Uri $tarballUrl -OutFile $tarballPath
-        tar -xzf $tarballPath -C $tmp
+        Invoke-WebRequest -Uri $tarballUrl -OutFile "$tmp\source.tar.gz"
+        tar -xzf "$tmp\source.tar.gz" -C $tmp
+      }
+      if (-not $DryRun) {
+        $top = (tar -tzf "$tmp\source.tar.gz" | Select-Object -First 1)
+        if (-not $top) { throw "Cannot determine archive root directory" }
+        $top = $top -replace '/.*$',''
         if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir }
-        Move-Item "$tmp\agentrouter-spoof-proxy-main" $InstallDir
+        Move-Item "$tmp\$top" $InstallDir
         Remove-Item -Recurse -Force $tmp
       }
     }
   }
-  Set-Location $InstallDir
+
+  if ($DryRun -and -not (Test-Path $InstallDir)) {
+    Write-Info "DRY-RUN: project would be at $InstallDir (directory not created in dry-run)"
+  } else {
+    Set-Location $InstallDir
+  }
 }
 
 # ── Pick method ──
@@ -142,14 +195,18 @@ else {
     "1" { $method = "docker" }
     "2" { $method = "pm2" }
     "3" { $method = "direct" }
-    default { Write-Error "Invalid choice."; pause; exit 1 }
+    default { Write-Fail "Invalid choice."; pause; exit 1 }
   }
 }
 
 # ── Setup .env ──
 if (-not (Test-Path ".env")) {
-  Copy-Item .env.example .env
-  Write-OK ".env created (using defaults)"
+  if ($DryRun) {
+    Write-Info "DRY-RUN: Copy-Item .env.example .env"
+  } else {
+    Copy-Item .env.example .env
+    Write-OK ".env created (using defaults)"
+  }
 }
 
 # ── Method runners ──
@@ -160,10 +217,16 @@ switch ($method) {
       if (Confirm-Step "Install Docker Desktop") {
         Write-Info "Opening Docker Desktop download page..."
         Start-Process "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
-        Write-Error "Install Docker Desktop first, then rerun the installer."
+        Write-Fail "Install Docker Desktop first, then rerun the installer."
         pause; exit 1
       }
-      Write-Error "Docker is required for this method. Choose PM2 or Direct."
+      Write-Fail "Docker is required for this method. Choose PM2 or Direct."
+      pause; exit 1
+    }
+    # Native exit codes do not throw in PowerShell — check $LASTEXITCODE explicitly.
+    docker compose version | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      Write-Fail "Docker is installed but the compose plugin is missing. Update Docker Desktop (Compose v2 is bundled)."
       pause; exit 1
     }
     Run-Step "docker compose up -d --build" { docker compose up -d --build }
@@ -190,13 +253,8 @@ switch ($method) {
       Write-Info "Installing PM2..."
       Run-Step "npm install -g pm2" { npm install -g pm2 }
     }
-    if (-not $DryRun) {
-      pm2 start proxy.mjs --name agentrouter-proxy
-      pm2 save
-    } else {
-      Write-Info "DRY-RUN: pm2 start proxy.mjs --name agentrouter-proxy"
-      Write-Info "DRY-RUN: pm2 save"
-    }
+    Run-Step "pm2 start proxy.mjs --name agentrouter-proxy" { pm2 start proxy.mjs --name agentrouter-proxy }
+    Run-Step "pm2 save" { pm2 save }
     Write-Info "Auto-start: pm2 startup (run as Admin)"
     if (-not $DryRun) { Start-Sleep -Seconds 3 }
     if ($DryRun) {
