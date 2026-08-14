@@ -51,7 +51,7 @@ Dengan menaruh proxy ini di **belakang 9Router**, kamu bisa:
 | Komponen | Minimal |
 |----------|---------|
 | Docker | `docker --version` |
-| Node.js | 22+ (jika tanpa Docker) |
+| Go 1.26+ (hanya untuk build dari source) | `go version` |
 | 9Router | Sudah terinstall dan berjalan |
 | API Key | Dari akun agentrouter.org |
 
@@ -72,45 +72,39 @@ docker compose up -d --build
 
 > **Windows (PowerShell):** Ganti `cp` dengan `copy` atau `Copy-Item .env.example .env`.
 
-### Opsi B — Node.js Langsung (Tanpa Docker)
+### Opsi B — Binary Langsung (Tanpa Docker)
 
-> **Rekomendasi:** Gunakan **PM2** sebagai process manager — proxy otomatis restart jika crash atau server reboot.
+> **Rekomendasi:** Pakai **systemd** sebagai process manager (Linux) — proxy otomatis restart jika crash atau server reboot. Di Windows pakai Windows Service (`sc.exe`).
 
-#### 1. Install PM2 (sekali saja)
+#### 1. Install lewat installer (otomatis)
 
 ```bash
-npm install -g pm2
+curl -fsSL https://raw.githubusercontent.com/trefeon/agentrouter-spoof-proxy/main/scripts/install.sh | bash -s -- --systemd
 ```
 
-#### 2. Clone dan jalankan proxy
+Installer akan: download prebuilt binary dari GitHub Releases (atau build dari source jika belum ada release), buat `/etc/agentrouter-proxy.env`, dan daftarkan service systemd. Alternatif manual:
+
+#### 2. Manual — download binary + systemd
 
 ```bash
 git clone https://github.com/trefeon/agentrouter-spoof-proxy.git
 cd agentrouter-spoof-proxy
 cp .env.example .env
-pm2 start proxy.mjs --name agentrouter-proxy
-pm2 save
+go build -trimpath -ldflags="-s -w" -o /usr/local/bin/agentrouter-proxy ./cmd/proxy   # butuh Go 1.26+
+cp deploy/agentrouter-proxy.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now agentrouter-proxy
 ```
 
-> **Windows (PowerShell):** Ganti `cp` dengan `copy`.
+> **Windows (PowerShell):** Ganti `cp` dengan `copy`. Install service: `sc.exe create agentrouter-proxy binPath= "C:\path\agentrouter-proxy.exe" start= auto`.
 
-#### 3. (Opsional) Auto-start saat reboot
-
-```bash
-pm2 startup
-```
-
-Ikuti instruksi yang muncul di terminal.
-
-#### Perintah PM2 sehari-hari
+#### Perintah systemd sehari-hari
 
 | Perintah | Fungsi |
 |----------|--------|
-| `pm2 status` | Cek status proxy |
-| `pm2 logs agentrouter-proxy` | Lihat log real-time |
-| `pm2 restart agentrouter-proxy` | Restart proxy |
-| `pm2 stop agentrouter-proxy` | Stop proxy |
-| `pm2 delete agentrouter-proxy` | Hapus dari PM2 |
+| `systemctl status agentrouter-proxy` | Cek status proxy |
+| `journalctl -u agentrouter-proxy -f` | Lihat log real-time |
+| `systemctl restart agentrouter-proxy` | Restart proxy |
+| `systemctl stop agentrouter-proxy` | Stop proxy |
 
 ---
 
@@ -195,7 +189,7 @@ docker compose up -d
 
 ---
 
-### Jika pakai Node.js langsung (Opsi B)
+### Jika pakai binary langsung (Opsi B)
 
 9Router dan proxy sama-sama di host — **tidak perlu setup jaringan**. Cukup pastikan 9Router mengarah ke:
 

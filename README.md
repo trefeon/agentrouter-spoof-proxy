@@ -1,6 +1,8 @@
 # AgentRouter Spoof Proxy
 
-Lightweight Node.js reverse proxy that bypasses AgentRouter WAF by spoofing Claude Code headers. Zero runtime dependencies — thin modular entry + 13 focused modules, 120MB Docker image.
+Fast, cross-platform reverse proxy (Go) that bypasses the AgentRouter WAF by
+spoofing Claude Code headers. Single static binary, no runtime dependencies,
+~15-25MB Docker image.
 
 > 🇮🇩 **[Panduan 9Router (Bahasa Indonesia)](docs/panduan-9router.md)** — Indonesian tutorial for integrating with 9Router.
 
@@ -20,6 +22,12 @@ Non-interactive Docker install:
 curl -fsSL https://raw.githubusercontent.com/trefeon/agentrouter-spoof-proxy/main/scripts/install.sh | bash -s -- --yes --docker
 ```
 
+Host install as a systemd service (`--pm2` is a deprecated alias):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/trefeon/agentrouter-spoof-proxy/main/scripts/install.sh | bash -s -- --systemd
+```
+
 Dry-run without changing the system:
 
 ```bash
@@ -32,7 +40,25 @@ curl -fsSL https://raw.githubusercontent.com/trefeon/agentrouter-spoof-proxy/mai
 iwr -useb https://raw.githubusercontent.com/trefeon/agentrouter-spoof-proxy/main/scripts/install.ps1 | iex
 ```
 
-Both scripts auto-detect your setup and guide you through Docker, PM2, or direct Node.js. Linux can install missing dependencies through supported package managers when you pass `--yes`; Windows can attempt Node.js install through `winget` and opens Docker Desktop installation if needed.
+Use `-Service` to register a Windows service, `-Docker` for Docker Desktop
+(`-PM2` is a deprecated alias).
+
+The installer downloads the prebuilt binary from GitHub Releases, or falls back
+to building from source (Go 1.26+). It auto-detects Docker/systemd and guides
+you through the rest.
+
+### Manual / Docker
+
+```bash
+git clone https://github.com/trefeon/agentrouter-spoof-proxy.git
+cd agentrouter-spoof-proxy
+cp .env.example .env
+
+# Pick one:
+docker compose up -d --build                 # Docker (recommended)
+go build -o agentrouter-proxy ./cmd/proxy && ./agentrouter-proxy   # Direct
+make build && ./dist/proxy                    # via Makefile
+```
 
 ---
 
@@ -82,7 +108,7 @@ Wait 5 seconds if `wafCookie: false` — WAF warmup runs at startup.
 | **Model discovery** | Optional dynamic model list via `AR_API_KEY` |
 | **Bounded bodies** | 20MB limit → clean `413`; stalled uploads → `408` |
 | **Narrow proxy surface** | Only 3 API routes proxied; localhost bind by default; optional token auth |
-| **Graceful shutdown** | Drains active streams, destroys agent pool |
+| **Graceful shutdown** | Drains active streams, cancels schedulers, 15s force-exit bound |
 
 ---
 
@@ -107,7 +133,7 @@ and long-lived streams are never cut while the upstream connection is alive.
 
 ## Configuration (`.env`)
 
-All values have defaults — copy `.env.example` to `.env` only if you need to change something.
+All values have defaults — copy `.env.example` to `.env` only if you need to change something. Env names are identical to the Node.js version; existing `.env` files keep working.
 
 | Variable | Default | What it does |
 |----------|---------|-------------|
@@ -139,9 +165,9 @@ See `.env.example` for the full list.
 ### Retry behavior and token billing
 
 By default (`RETRY_ON_5XX=false`), the proxy only retries on **transport-level errors**
-(timeout, socket hang up, ECONNRESET, ETIMEDOUT, ENETUNREACH), up to `MAX_RETRIES=2`
-(3 attempts total) with an exponential delay of `RETRY_DELAY_MS × 2^attempt`. HTTP 5xx
-responses from the upstream are forwarded to the client immediately.
+(timeout, connection reset, unreachable), up to `MAX_RETRIES=2` (3 attempts total)
+with an exponential delay of `RETRY_DELAY_MS × 2^attempt`. HTTP 5xx responses
+from the upstream are forwarded to the client immediately.
 
 When `RETRY_ON_5XX=true`, the proxy also retries on 5xx responses. **Warning:** each
 retry re-sends the full request body to the upstream, which means the upstream counts
@@ -158,14 +184,15 @@ these blocks, thinking content leaks as raw `<think>...</think>` tags in text ou
 
 With `STRIP_THINKING_TAGS=true` (default), the proxy strips `<think>...</think>` tags
 from **OpenAI-format** (`/v1/chat/completions`) SSE text before forwarding to the
-client — OpenAI clients cannot render thinking blocks. Tags and their content are handled even when they span multiple SSE
-chunks or are split mid-tag at a chunk boundary, and multi-byte UTF-8 content is never corrupted.
-If the upstream ends while a thinking span is still open, the stream ends with a `502` error frame
-rather than leaking raw tags. **Anthropic-format** (`/v1/messages`) thinking blocks always pass through untouched:
-harness clients (opencode, OpenClaw, claude-code) render thinking natively, and
-stripping it there would remove reasoning and create silent gaps that trigger
-client-side idle watchdogs. Set to `false` if your OpenAI client supports thinking
-content.
+client — OpenAI clients cannot render thinking blocks. Stripping is byte-level: tags
+and their content are handled even when they span multiple SSE chunks or are split
+mid-tag at a chunk boundary, and multi-byte UTF-8 content is never corrupted. If the
+upstream ends while a thinking span is still open, the stream ends with a `502` error
+frame rather than leaking raw tags. **Anthropic-format** (`/v1/messages`) thinking
+blocks always pass through untouched: harness clients (opencode, OpenClaw, claude-code)
+render thinking natively, and stripping it there would remove reasoning and create
+silent gaps that trigger client-side idle watchdogs. Set to `false` if your OpenAI
+client supports thinking content.
 
 ### Model-aware headers
 
@@ -203,61 +230,59 @@ Client → 9Router → agentrouter-proxy:8318 → agentrouter.org (upstream)
 ```
 
 ```
-proxy.mjs (~166 lines, thin entry: routing allowlist + inbound auth + lifecycle)
-├── src/config.mjs                     — env + constants + agent pool
-├── src/logger.mjs                     — logging
-├── src/utils.mjs                      — pure functions (path, headers, retry, adaptive timeout)
-├── src/errors.mjs                     — buildError + isOurError marker
-├── src/status-code.mjs                — error code → HTTP status mapping
-├── src/auth/spoof.mjs                 — Claude Code header spoofing
-├── src/auth/waf.mjs                   — WAF cookie warmup
-├── src/models/discovery.mjs           — static/dynamic model discovery
-├── src/models/health.mjs              — auto-detect failing models, recovery probe
-├── src/models/stats.mjs               — model success metrics
-├── src/resilience/circuit-breaker.mjs — circuit breaker state
-├── src/proxy/handler.mjs              — request handler (buffering, telemetry, retry loop)
-└── src/proxy/stream.mjs               — SSE streaming pump (keepalive, timeouts, backpressure)
+cmd/proxy/main.go            — thin entry: config validation, signal shutdown, -healthcheck flag
+├── internal/config           — env config (caarlos0/env) + Validate() (slog wired in server/main)
+├── internal/auth             — spoof headers + WAF cookie store/warmup
+├── internal/models           — discovery, health probing, stats
+├── internal/resilience       — circuit breaker (atomic)
+├── internal/proxy            — handler (retry loop), SSE pump, pure helpers (think-strip, frame parser)
+├── internal/server           — routing, schedulers, graceful shutdown
+├── testutil/mockupstream     — scripted mock upstream for tests
+└── e2e                       — 62 E2E + 7 issue-regression tests
 ```
 
 ---
 
-## Running Tests
+## Building & Testing
 
-> Runtime is zero-dependency. The scripts below use `oxlint` + the built-in `node:test` runner; run `npm install` once (devDependencies only) to use them.
+> Runtime is zero-dependency. Dev tooling: Go 1.26+, golangci-lint (optional).
 
 ```bash
-# Everything (132 unit + 55 E2E + 7 issue-verification = 194 tests, exits cleanly)
-npm test
+# Everything (~222 tests, all packages)
+go test ./...
 
-# Fast unit tests — pure functions + SSE pump, no long-lived processes (132 tests)
-npm run test:unit
+# Fast unit tests (pure core + pump + handler)
+go test ./internal/...
 
-# E2E tests — spawns proxy + mock upstream (55 tests, ~75s)
-npm run test:e2e
+# E2E — in-process proxy + mock upstream (62 tests)
+go test ./e2e/
 
 # Issue-verification regression tests (7 tests)
-npm run test:verify
+go test ./e2e/ -run TestIssue
 
-# Lint + syntax gate
-npm run lint
-npm run check
+# Race detector (needs a C toolchain for cgo)
+go test -race ./...
 
-# Zero-dep coverage (node built-in) — config, resilience, stats, stream, utils, models
-npm run coverage
+# Lint + vet + build
+make check        # vet + lint + test
+go vet ./...
+go build ./...
+
+# Cross-compile all platforms
+make cross        # → dist/ (linux amd64/arm64, darwin arm64, windows amd64)
+
+# Multi-arch Docker image
+make image        # buildx, linux/amd64 + linux/arm64
 ```
 
 ## Local Debugging
 
 | Symptom | Command |
 |---------|---------|
-| Hang / who holds the socket | `NODE_DEBUG=http,net,stream,tls node proxy.mjs` |
-| Stack of warnings (listener leaks) | `node --trace-warnings --stack-trace-limit=50 proxy.mjs` |
-| Verbose proxy logs | `LOG_LEVEL=debug node proxy.mjs` |
-| Attach debugger | `node --inspect proxy.mjs` → Chrome `chrome://inspect` |
-| Diagnostic report on demand | `node --report-on-signal proxy.mjs` then `kill -USR2` → JSON report |
-| Stuck shutdown (diagnostic only) | `node --test --test-force-exit tests/proxy.test.mjs` |
-
-Zero runtime dependencies — everything above is built-in Node (or `oxlint` as dev-only).
+| Verbose proxy logs | `LOG_LEVEL=debug go run ./cmd/proxy` |
+| Attach debugger | `dlv debug ./cmd/proxy` (or GoLand/VSCode Go) |
+| Health probe for Docker | `/proxy -healthcheck` (exit 0/1) |
+| Graceful shutdown | `SIGTERM`/`SIGINT` → drain streams, 15s force-exit bound |
 
 ---
 
@@ -267,7 +292,7 @@ Zero runtime dependencies — everything above is built-in Node (or `oxlint` as 
 A: Not a proxy bug. The agentrouter.org upstream occasionally Go-panics for Claude models. The proxy has **auto model health** — a failing model is removed from `/v1/models` immediately and 9Router falls back to another model automatically. Recovery probe every 60 seconds. Progressive cooldown: 30s → 1m → 2m → 5m → 10m.
 
 **Q: Streaming keeps disconnecting / getting cut mid-answer?**
-A: Since the hardening, the proxy never cuts a stream that is still alive — as long as the upstream is connected, the stall watchdog only resets (safe for long thinking / tool use). A stream only ends when: the upstream finishes, an error occurs, the client disconnects, or the stream is truly idle (no events at all) beyond `SSE_IDLE_TIMEOUT_MS` (default 10 minutes). If streams still get cut, check the proxy logs for `SLOW STREAM` / `IDLE TIMEOUT` and adjust `SSE_CHUNK_TIMEOUT_MS` / `SSE_IDLE_TIMEOUT_MS`.
+A: The proxy never cuts a stream that is still alive — as long as the upstream is connected, the stall watchdog only resets (safe for long thinking / tool use). A stream only ends when: the upstream finishes, an error occurs, the client disconnects, or the stream is truly idle (no events at all) beyond `SSE_IDLE_TIMEOUT_MS` (default 10 minutes). If streams still get cut, check the logs for `SLOW STREAM` / `IDLE TIMEOUT` and adjust `SSE_CHUNK_TIMEOUT_MS` / `SSE_IDLE_TIMEOUT_MS`.
 
 **Q: OpenAI / chat completions gives error "Expected 'id' to be a string"?**
 A: Fixed. Terminal events are now format-aware: `/v1/chat/completions` streams end with `data: [DONE]`, not the Anthropic-format `event: message_stop`.

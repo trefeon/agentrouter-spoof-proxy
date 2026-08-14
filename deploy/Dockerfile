@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
-# Go rewrite image (used from the parity phase onward; the Node Dockerfile stays
-# live until then). Multi-stage: native cross-compile via TARGETOS/TARGETARCH —
-# no QEMU emulation, ~15-25MB final image vs the 120MB Node one.
+# Go image: multi-stage, native cross-compile via TARGETOS/TARGETARCH (no QEMU
+# emulation), ~15-25MB final image. HEALTHCHECK uses the binary's -healthcheck
+# flag mode (distroless has no shell/wget).
 FROM --platform=$BUILDPLATFORM golang:1.26 AS build
 ARG TARGETOS TARGETARCH
 WORKDIR /src
