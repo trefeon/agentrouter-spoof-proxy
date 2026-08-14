@@ -1,5 +1,10 @@
 # Go Migration Plan — agentrouter-spoof-proxy
 
+> **STATUS: EXECUTED ✅** — This migration is complete (commit `3418ea1`, Aug 2026).
+> The Node.js codebase was removed in commit `4a76d62`; the repository is now
+> 100% Go. This document is retained as the historical port map / behavioral
+> contract reference. See `README.md` and `AGENTS.md` for the current facts.
+
 Full rewrite of the Node.js proxy in **Go**. Goal: a *fast* cross-platform proxy —
 small binary, tiny Docker image, long-lived SSE streaming without framework
 overhead. Current code: zero-dep Node ESM, 13 modules + thin entry, 194 tests

@@ -88,7 +88,7 @@ Expected: `{"ok":true,"upstream":"agentrouter.org:443","modelSource":"static","s
 ```bash
 go build ./...            # compile check
 go vet ./...              # static analysis
-go test ./...             # all tests (~222 across 8 packages)
+go test ./...             # all tests (~222 across 9 packages)
 go test ./e2e/            # E2E only
 go test -race ./...       # race detector (needs cgo toolchain)
 gofmt -l .                # formatting check
