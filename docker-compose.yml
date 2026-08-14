@@ -1,12 +1,20 @@
 services:
   agentrouter-proxy:
-    build: .
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
     container_name: agentrouter-proxy
     ports:
       - "${LISTEN_PORT:-8318}:${LISTEN_PORT:-8318}"
     env_file:
       - path: .env
         required: false
+    healthcheck:
+      test: ["CMD", "-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
     environment:
       - LISTEN_PORT=${LISTEN_PORT:-8318}
       # Docker-to-Docker exposure: the container must listen on all interfaces

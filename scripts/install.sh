@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # SECURITY NOTE: this installer downloads and executes remote code over TLS
-# (GitHub, NodeSource, get.docker.com). Review the script before piping it
+# (GitHub releases, go.dev, get.docker.com). Review the script before piping it
 # from the internet: https://github.com/trefeon/agentrouter-spoof-proxy/blob/main/scripts/install.sh
 
 # AgentRouter Spoof Proxy - Linux One-Line Installer
@@ -10,7 +10,7 @@ set -euo pipefail
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/trefeon/agentrouter-spoof-proxy/main/scripts/install.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/trefeon/agentrouter-spoof-proxy/main/scripts/install.sh | bash -s -- --yes --docker
-#   bash scripts/install.sh --dry-run --docker
+#   bash scripts/install.sh --dry-run --systemd
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -20,12 +20,19 @@ NC='\033[0m'
 
 REPO_URL="https://github.com/trefeon/agentrouter-spoof-proxy.git"
 TARBALL_URL="https://github.com/trefeon/agentrouter-spoof-proxy/archive/refs/heads/main.tar.gz"
+RELEASES_URL="https://github.com/trefeon/agentrouter-spoof-proxy/releases"
 DEFAULT_INSTALL_DIR="$HOME/agentrouter-spoof-proxy"
+
+AGENTROUTER_VERSION="${AGENTROUTER_VERSION:-latest}"
+GO_MIN_MAJOR=1
+GO_MIN_MINOR=26
+GO_MIN_VERSION="${GO_MIN_MAJOR}.${GO_MIN_MINOR}"
 
 DRY_RUN=false
 ASSUME_YES=false
 METHOD=""
 INSTALL_DIR="${AGENTROUTER_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
+PROJECT_DIR=""
 
 info()  { printf "%b[INFO]%b  %s\n" "$CYAN" "$NC" "$*"; }
 ok()    { printf "%b[OK]%b    %s\n" "$GREEN" "$NC" "$*"; }
@@ -38,26 +45,35 @@ AgentRouter Spoof Proxy installer
 
 Options:
   --docker        Run with Docker Compose
-  --pm2           Run with PM2 on the host
-  --direct        Run with node in the foreground
+  --systemd       Install as a systemd service on the host (--pm2 is a deprecated alias)
+  --direct        Run the proxy binary in the foreground
   --yes, -y       Non-interactive: accept safe defaults and dependency installs
   --dry-run       Print what would happen without changing the system
   --dir PATH      Install/clone directory when run outside a repo
   --help, -h      Show this help
 
+The proxy is a single static Go binary. A prebuilt binary is downloaded from
+GitHub releases when available; otherwise it is built from source, which
+requires Go 1.26+.
+
 Environment:
   AGENTROUTER_INSTALL_DIR=/path  Default install directory for curl | bash
+  AGENTROUTER_VERSION=latest     Prebuilt release version to download (default: latest)
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --docker) METHOD="docker" ;;
-    --pm2) METHOD="pm2" ;;
+    --systemd) METHOD="systemd" ;;
+    --pm2)
+      METHOD="systemd"
+      warn "--pm2 is deprecated; use --systemd (behavior unchanged)."
+      ;;
     --direct) METHOD="direct" ;;
     --yes|-y) ASSUME_YES=true ;;
     --dry-run) DRY_RUN=true ;;
-    --dir)
+    --dir|--install-dir)
       [ "$#" -ge 2 ] || { err "--dir requires a path"; exit 2; }
       INSTALL_DIR="$2"
       shift
@@ -147,42 +163,148 @@ ensure_command() {
   install_packages "$(detect_pm)" "$@"
 }
 
-ensure_node() {
-  if command -v node >/dev/null 2>&1; then
-    local node_ver
-    node_ver=$(node -v | sed 's/^v//')
-    if [ "${node_ver%%.*}" -lt 22 ]; then
-      warn "Node.js $node_ver found. Recommended: 22+. Continuing anyway."
-    else
-      ok "Node.js $node_ver"
-    fi
+detect_arch() {
+  local m
+  m="$(uname -m 2>/dev/null || echo unknown)"
+  case "$m" in
+    x86_64|amd64) echo amd64 ;;
+    aarch64|arm64) echo arm64 ;;
+    *)
+      warn "Unknown architecture '$m'; assuming amd64."
+      echo amd64
+      ;;
+  esac
+}
+
+# Download the prebuilt binary from GitHub releases (Step A).
+download_prebuilt() {
+  local dest="$1" os_arch url
+  case "$(detect_arch)" in
+    amd64) os_arch="linux-amd64" ;;
+    arm64) os_arch="linux-arm64" ;;
+    *) err "Unsupported architecture: $(uname -m)"; return 1 ;;
+  esac
+  url="$RELEASES_URL/${AGENTROUTER_VERSION}/download/agentrouter-proxy-${os_arch}"
+  info "Downloading prebuilt binary: $url"
+  if $DRY_RUN; then
+    info "DRY-RUN: curl -fsSL '$url' -o '$dest'"
     return 0
   fi
+  ensure_command curl curl || return 1
+  if ! curl -fsSL "$url" -o "$dest"; then
+    warn "Prebuilt binary download failed (no release published yet is normal)."
+    return 1
+  fi
+  chmod +x "$dest"
+  ok "Downloaded agentrouter-proxy binary"
+  return 0
+}
 
-  warn "Node.js not found."
+# Install Go 1.26+ from the official go.dev tarball (preferred when the
+# package manager ships an old golang-go).
+install_go_tarball() {
+  local arch url tmp
+  arch=$(detect_arch)
+  url="https://go.dev/dl/go${GO_MIN_VERSION}.linux-${arch}.tar.gz"
+  info "Downloading Go $GO_MIN_VERSION from go.dev: $url"
+  if $DRY_RUN; then
+    info "DRY-RUN: curl -fsSL '$url' -o /tmp/go.tar.gz && sudo tar -C /usr/local -xzf /tmp/go.tar.gz && export PATH=/usr/local/go/bin:\$PATH"
+    return 0
+  fi
+  tmp="$(mktemp -d)"
+  if ! curl -fsSL "$url" -o "$tmp/go.tar.gz"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  run sudo_cmd rm -rf /usr/local/go
+  run sudo_cmd tar -C /usr/local -xzf "$tmp/go.tar.gz"
+  rm -rf "$tmp"
+  export PATH="/usr/local/go/bin:$PATH"
+  ok "Installed Go $GO_MIN_VERSION to /usr/local/go"
+  return 0
+}
+
+# Ensure a Go toolchain >= 1.26 is available (Step B prerequisite).
+ensure_go() {
+  if command -v go >/dev/null 2>&1; then
+    local ver major minor
+    ver=$(go version | sed -E 's/.*go([0-9]+)\.([0-9]+).*/\1.\2/')
+    major="${ver%%.*}"
+    minor="${ver##*.}"
+    if [ "$major" -gt "$GO_MIN_MAJOR" ] || { [ "$major" -eq "$GO_MIN_MAJOR" ] && [ "$minor" -ge "$GO_MIN_MINOR" ]; }; then
+      ok "Go $ver"
+      return 0
+    fi
+    warn "Go $ver found. Go $GO_MIN_VERSION+ is required to build from source."
+  else
+    warn "Go not found."
+  fi
+
   local pm
   pm=$(detect_pm)
   case "$pm" in
     apt)
-      if confirm "Install Node.js 22 using NodeSource"; then
+      # apt's golang-go can lag behind 1.26; prefer the official tarball.
+      if confirm "Install Go $GO_MIN_VERSION+ from the official tarball (go.dev)"; then
+        install_go_tarball && return 0
+      fi
+      warn "The apt golang-go package may be older than $GO_MIN_VERSION."
+      if confirm "Install Go from the system package manager anyway"; then
         run sudo_cmd apt-get update
-        run sudo_cmd apt-get install -y ca-certificates curl gnupg
-        if $DRY_RUN; then
-          info "DRY-RUN: curl NodeSource setup script | sudo bash"
-        else
-          curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-        fi
-        run sudo_cmd apt-get install -y nodejs
+        run sudo_cmd apt-get install -y golang-go
         return 0
       fi
       ;;
     dnf|yum|pacman|zypper)
-      install_packages "$pm" nodejs npm && return 0
+      install_packages "$pm" golang && return 0
       ;;
   esac
 
-  err "Node.js is required. Install Node.js 22+ then rerun the installer."
-  exit 1
+  err "Go $GO_MIN_VERSION+ is required to build from source."
+  err "Install it manually (https://go.dev/dl/) and rerun, or wait for a prebuilt release."
+  return 1
+}
+
+# Build the binary from source in PROJECT_DIR (Step B).
+build_from_source() {
+  local dest="$1"
+  local src="${PROJECT_DIR:-$INSTALL_DIR}"
+
+  if $DRY_RUN; then
+    info "DRY-RUN: go build -trimpath -ldflags=\"-s -w\" -o $dest ./cmd/proxy  (in $src)"
+    return 0
+  fi
+
+  if [ ! -f "$src/go.mod" ] || [ ! -d "$src/cmd/proxy" ]; then
+    warn "No Go source tree at $src; cloning the repository for the build."
+    if [ -d "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]; then
+      confirm "Directory $INSTALL_DIR is not empty. Remove it and clone fresh?" || { err "Aborting: $INSTALL_DIR is not empty."; exit 1; }
+      run rm -rf "$INSTALL_DIR"
+    fi
+    run git clone "$REPO_URL" "$INSTALL_DIR"
+    src="$INSTALL_DIR"
+  fi
+
+  info "Building agentrouter-proxy from source (Go toolchain)..."
+  if ! (cd "$src" && go build -trimpath -ldflags="-s -w" -o "$dest" ./cmd/proxy); then
+    err "go build failed."
+    return 1
+  fi
+  ok "Built agentrouter-proxy from source"
+  return 0
+}
+
+# Step A -> B -> C: download prebuilt, fall back to source build.
+obtain_binary() {
+  local dest="$1"
+  download_prebuilt "$dest"
+  if $DRY_RUN; then
+    info "DRY-RUN: fallback if download fails -> go build -trimpath -ldflags=\"-s -w\" -o $dest ./cmd/proxy (Go $GO_MIN_VERSION+ required)"
+    return 0
+  fi
+  warn "Prebuilt binary unavailable; falling back to building from source."
+  ensure_go || return 1
+  build_from_source "$dest"
 }
 
 ensure_docker() {
@@ -224,22 +346,8 @@ ensure_docker() {
   return 1
 }
 
-ensure_pm2() {
-  ensure_node
-  if command -v pm2 >/dev/null 2>&1; then
-    ok "PM2 available"
-    return 0
-  fi
-  info "Installing PM2..."
-  if $DRY_RUN; then
-    info "DRY-RUN: npm install -g pm2"
-  else
-    npm install -g pm2 2>/dev/null || sudo npm install -g pm2
-  fi
-}
-
 resolve_project_dir() {
-  if [ -f proxy.mjs ] && [ -d src ]; then
+  if [ -f go.mod ] && [ -d cmd/proxy ]; then
     PROJECT_DIR="$(pwd)"
     return 0
   fi
@@ -248,7 +356,7 @@ resolve_project_dir() {
   if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
   fi
-  if [ -n "$script_dir" ] && [ -f "$script_dir/../proxy.mjs" ]; then
+  if [ -n "$script_dir" ] && [ -f "$script_dir/../go.mod" ]; then
     PROJECT_DIR="$(cd "$script_dir/.." && pwd)"
     return 0
   fi
@@ -260,7 +368,7 @@ resolve_project_dir() {
     run git -C "$PROJECT_DIR" pull --ff-only
     return 0
   fi
-  if [ -f "$INSTALL_DIR/proxy.mjs" ]; then
+  if [ -f "$INSTALL_DIR/go.mod" ]; then
     PROJECT_DIR="$INSTALL_DIR"
     return 0
   fi
@@ -313,15 +421,15 @@ pick_method() {
   echo ""
   echo "How do you want to run the proxy?"
   echo "  1) Docker          (recommended - auto-restart, isolated)"
-  echo "  2) PM2             (lightweight, runs on host)"
-  echo "  3) Direct node     (foreground, for testing only)"
+  echo "  2) systemd         (runs on host, auto-restart)"
+  echo "  3) Direct binary   (foreground, for testing only)"
   echo ""
   local choice
   read -r -p "Choice [1]: " choice
   choice=${choice:-1}
   case "$choice" in
     1) METHOD="docker" ;;
-    2) METHOD="pm2" ;;
+    2) METHOD="systemd" ;;
     3) METHOD="direct" ;;
     *) err "Invalid choice."; exit 1 ;;
   esac
@@ -335,24 +443,34 @@ ensure_env() {
 }
 
 health_check() {
-  local url="http://localhost:8318/health"
+  local url="http://127.0.0.1:8318/health"
   if $DRY_RUN; then
-    info "DRY-RUN: check $url"
+    info "DRY-RUN: poll $url up to 15s; expect HTTP 200 with {\"ok\":true}"
     return 0
   fi
-  if command -v curl >/dev/null 2>&1 && curl -sf "$url" >/dev/null 2>&1; then
-    ok "Proxy running! http://localhost:8318"
-    info "Health: $(curl -s "$url")"
-  else
-    warn "Health check failed or curl unavailable. Wait a few seconds, then check logs."
+  info "Waiting for proxy health (up to 15s)..."
+  local i
+  for i in $(seq 1 30); do
+    if curl -fsS "$url" 2>/dev/null | grep -q '"ok":true'; then
+      ok "Proxy running! http://localhost:8318"
+      info "Health: $(curl -s "$url")"
+      return 0
+    fi
+    sleep 0.5
+  done
+  err "Health check failed after 15s."
+  if command -v curl >/dev/null 2>&1; then
+    err "Last health payload: $(curl -s "$url" || echo unavailable)"
   fi
+  err "Hint: check the proxy logs. systemd: systemctl status agentrouter-proxy; journalctl -u agentrouter-proxy -n 50. Docker: docker logs agentrouter-proxy."
+  return 1
 }
 
 run_docker() {
   if ! ensure_docker; then
-    warn "Docker unavailable. Falling back to PM2."
-    METHOD="pm2"
-    run_pm2
+    warn "Docker unavailable. Falling back to systemd."
+    METHOD="systemd"
+    run_systemd || return 1
     return
   fi
   ensure_env
@@ -361,31 +479,87 @@ run_docker() {
   if ! $DRY_RUN; then
     sleep 5
   fi
-  health_check
+  health_check || return 1
 }
 
-run_pm2() {
-  ensure_pm2
-  ensure_env
-  info "Starting with PM2..."
-  run pm2 start proxy.mjs --name agentrouter-proxy
-  run pm2 save
-  info "To auto-start on reboot: pm2 startup (follow printed instructions)"
-  if ! $DRY_RUN; then
-    sleep 2
+run_systemd() {
+  if ! $DRY_RUN && ! command -v systemctl >/dev/null 2>&1; then
+    err "systemctl not found; systemd is required for this method."
+    err "Use --docker instead, or run --direct in the foreground."
+    exit 1
   fi
-  health_check
-  info "Manage: pm2 status | pm2 logs agentrouter-proxy | pm2 restart agentrouter-proxy"
+
+  ensure_env
+
+  local bin="/usr/local/bin/agentrouter-proxy"
+  local env_file="/etc/agentrouter-proxy.env"
+  local unit_src="$PROJECT_DIR/deploy/agentrouter-proxy.service"
+  local unit_dest="/etc/systemd/system/agentrouter-proxy.service"
+
+  info "Installing agentrouter-proxy as a systemd service..."
+
+  # 1) Obtain and install the binary
+  if $DRY_RUN; then
+    obtain_binary "$bin"
+  else
+    local tmp_bin
+    tmp_bin="$(mktemp)"
+    if ! obtain_binary "$tmp_bin"; then
+      err "Could not obtain the agentrouter-proxy binary."
+      err "Install Go $GO_MIN_VERSION+ and rerun, or check for prebuilt releases: $RELEASES_URL"
+      exit 1
+    fi
+    run sudo_cmd install -m 0755 "$tmp_bin" "$bin"
+    rm -f "$tmp_bin"
+    ok "Installed binary to $bin"
+  fi
+
+  # 2) Environment file (/etc/agentrouter-proxy.env from the user's .env)
+  if [ -f .env ] || $DRY_RUN; then
+    run sudo_cmd cp .env "$env_file"
+    ok "Installed environment to $env_file"
+  else
+    err "No .env found (ensure_env should have created one)."
+    exit 1
+  fi
+
+  # 3) systemd unit
+  if [ -f "$unit_src" ]; then
+    run sudo_cmd cp "$unit_src" "$unit_dest"
+  elif $DRY_RUN; then
+    info "DRY-RUN: sudo cp <repo>/deploy/agentrouter-proxy.service $unit_dest"
+  else
+    err "Missing unit file: $unit_src"
+    exit 1
+  fi
+  run sudo_cmd systemctl daemon-reload
+  run sudo_cmd systemctl enable --now agentrouter-proxy
+  ok "agentrouter-proxy service installed, enabled and started"
+
+  if ! $DRY_RUN; then
+    sleep 3
+  fi
+  health_check || return 1
+  info "Manage: systemctl status agentrouter-proxy | systemctl restart agentrouter-proxy | journalctl -u agentrouter-proxy -f"
 }
 
 run_direct() {
-  ensure_node
   ensure_env
+  local bin="$PROJECT_DIR/agentrouter-proxy"
+  if ! obtain_binary "$bin"; then
+    err "Could not obtain the agentrouter-proxy binary."
+    err "Install Go $GO_MIN_VERSION+ and rerun, or check for prebuilt releases: $RELEASES_URL"
+    exit 1
+  fi
+  if ! $DRY_RUN && [ ! -x "$bin" ]; then
+    err "Binary not found or not executable: $bin"
+    exit 1
+  fi
   info "Starting proxy in foreground (Ctrl+C to stop)..."
   if $DRY_RUN; then
-    info "DRY-RUN: node proxy.mjs"
+    info "DRY-RUN: ./agentrouter-proxy"
   else
-    node proxy.mjs
+    cd "$PROJECT_DIR" && ./agentrouter-proxy
   fi
 }
 
@@ -406,8 +580,8 @@ info "Project dir: $PROJECT_DIR"
 
 pick_method
 case "$METHOD" in
-  docker) run_docker ;;
-  pm2) run_pm2 ;;
+  docker) run_docker || exit 1 ;;
+  systemd) run_systemd || exit 1 ;;
   direct) run_direct ;;
   *) err "Unknown method: $METHOD"; exit 1 ;;
 esac

@@ -1,0 +1,20 @@
+# golangci-lint v2 configuration
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - errcheck
+    - ineffassign
+    - staticcheck
+    - unused
+  exclusions:
+    generated: lax
+    rules:
+      - linters: [errcheck]
+        source: "log\\.(Info|Warn|Error)\\("
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

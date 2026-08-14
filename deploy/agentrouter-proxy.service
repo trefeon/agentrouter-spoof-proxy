@@ -1,0 +1,29 @@
+# AgentRouter Spoof Proxy — systemd unit (replaces PM2 for the Go binary)
+# Install: cp deploy/agentrouter-proxy.service /etc/systemd/system/ &&
+#          systemctl daemon-reload && systemctl enable --now agentrouter-proxy
+[Unit]
+Description=AgentRouter Spoof Proxy (Go)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nobody
+Group=nogroup
+ExecStart=/usr/local/bin/agentrouter-proxy
+# Env comes from /etc/agentrouter-proxy.env (copy of .env, KEY=value lines)
+EnvironmentFile=/etc/agentrouter-proxy.env
+Restart=always
+RestartSec=2
+# Timeouts in seconds; SSE streams may be long-lived so no TimeoutStopSec abuse
+TimeoutStopSec=20
+KillSignal=SIGTERM
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=
+
+[Install]
+WantedBy=multi-user.target

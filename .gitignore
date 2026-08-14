@@ -62,3 +62,14 @@ coverage/
 .idea/
 *.swp
 *.swo
+
+# Cloned reference repos (research only, not part of the project)
+reference/
+
+# Go build output
+dist/
+bin/
+*.test
+
+# Go toolchain cache (local only)
+.golangci-cache/
