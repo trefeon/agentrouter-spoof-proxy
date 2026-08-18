@@ -136,6 +136,11 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 	resultCh := make(chan Result, 1)
 	stop := make(chan struct{})
 	streamDone := make(chan struct{})
+	// outDone closes when the OUTPUT goroutine terminates (write failure or
+	// stop). Consumers select on it so a dead OUTPUT can never block a send
+	// to frameCh forever (the wedge: OUTPUT stuck on w.Write to a stalled
+	// client, frameCh full, reader pinned on frameCh <- ).
+	outDone := make(chan struct{})
 
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
@@ -152,31 +157,67 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 	durMS := func() int64 { return time.Since(reqStart).Milliseconds() }
 
 	// finish sends the terminal done frame. Called exactly once per stream.
+	// If OUTPUT already died (client write failure), it has delivered its own
+	// Result; skip the send instead of blocking on a channel nobody reads.
 	finish := func(res Result, reason string, sawMessageStop bool) {
-		frameCh <- frame{done: true, reason: reason, sawMessageStop: sawMessageStop, result: res}
+		select {
+		case frameCh <- frame{done: true, reason: reason, sawMessageStop: sawMessageStop, result: res}:
+		case <-outDone:
+		}
 	}
 
 	// ── Single-writer OUTPUT goroutine ──
 	go func() {
+		defer close(outDone)
 		rc := http.NewResponseController(w)
+		// Per-frame write deadline: a client that stops reading fills its TCP
+		// send buffer and w.Write blocks until the kernel gives up (minutes).
+		// Enforce the chunk timeout so the pump fails the write, tears the
+		// stream down and records the failure instead of wedging. The
+		// deadline is re-armed on every frame so live streams are unaffected.
+		writeDeadline := o.ChunkTimeout
+		if writeDeadline <= 0 {
+			writeDeadline = o.IdleTimeout
+		}
+		if writeDeadline <= 0 {
+			writeDeadline = 30 * time.Second // sane cap for zero-config callers
+		}
+		writeFrame := func(p []byte) error {
+			_ = rc.SetWriteDeadline(time.Now().Add(writeDeadline))
+			if _, err := w.Write(p); err != nil {
+				return err
+			}
+			return rc.Flush()
+		}
 		for {
 			select {
 			case f := <-frameCh:
 				if f.done {
 					if f.reason != "" && o.IsSSE && !f.sawMessageStop && f.reason != "client_disconnected" {
-						_, _ = w.Write([]byte(SSEErrorFrame(o.Format, f.reason)))
-						_, _ = w.Write([]byte(AbnormalFinish(o.Format)))
-						_ = rc.Flush()
+						_ = writeFrame([]byte(SSEErrorFrame(o.Format, f.reason)))
+						_ = writeFrame([]byte(AbnormalFinish(o.Format)))
 					}
 					resultCh <- f.result
 					return
 				}
+				var p []byte
 				if f.isKeepalive {
-					_, _ = w.Write([]byte(":\n\n"))
+					p = []byte(":\n\n")
 				} else {
-					_, _ = w.Write(f.data)
+					p = f.data
 				}
-				_ = rc.Flush()
+				if err := writeFrame(p); err != nil {
+					// Client stalled/disconnected mid-stream: stop the whole
+					// pump. Closing the body and cancelling the stream context
+					// unblocks the reader (and any in-flight upstream read);
+					// the reader's finish select sees outDone and skips the
+					// done frame — this Result is the terminal one.
+					o.Log(fmt.Sprintf("SSE WRITE FAILED (client stalled or disconnected): %v", err))
+					_ = body.Close()
+					cancelStream()
+					resultCh <- Result{StatusCode: http.StatusBadGateway, DurationMs: durMS(), Error: "client_write_failed"}
+					return
+				}
 			case <-stop:
 				return
 			}
@@ -258,7 +299,11 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 			openaiPending = nil
 		}
 		if len(pend) > 0 {
-			frameCh <- frame{data: append([]byte(nil), pend...)}
+			select {
+			case frameCh <- frame{data: append([]byte(nil), pend...)}:
+			case <-outDone:
+				return
+			}
 		}
 		empty := o.IsSSE && !classifier.SawDataEvent()
 		if empty {
@@ -340,7 +385,16 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 					lastChunkAt.Store(time.Now().UnixNano())
 					o.LogDebug("CHUNK #%d %db, elapsed %dms", chunkCount, rr.n, durMS())
 					if len(out) > 0 {
-						frameCh <- frame{data: append([]byte(nil), out...)}
+						// Never block on a full frameCh forever: if the pump is
+						// being torn down (client gone, idle timeout, OUTPUT
+						// write failure) the send must yield so the watchdog's
+						// cancelStream can actually terminate the stream.
+						select {
+						case frameCh <- frame{data: append([]byte(nil), out...)}:
+						case <-streamCtx.Done():
+							handleCtxCancel()
+							return
+						}
 					}
 				}
 				if rr.err != nil {

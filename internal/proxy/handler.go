@@ -547,7 +547,10 @@ func (h *Handler) handleWafResponse(w http.ResponseWriter, r *http.Request, resp
 			StatusCode: status, DurationMs: time.Since(respStart).Milliseconds(),
 			Error: "http_" + strconv.Itoa(status), EmptyOutput: emptyOutput,
 		})
-		h.Breaker.RecordFailure()
+		// 4xx is "neither" for the circuit breaker (see the accounting comment
+		// in doRequest): a non-WAF 403/405 is a client-side rejection, not an
+		// upstream outage. Recording it as a failure would let an expired API
+		// key (403s) trip the circuit and 503 all traffic for 60s+.
 		h.writeFull(w, status, FilterHeaders(resp.Header), raw)
 		return true
 	}

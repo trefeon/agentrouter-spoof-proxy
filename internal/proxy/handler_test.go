@@ -493,6 +493,34 @@ func TestHandlerNon200Passthrough(t *testing.T) {
 	}
 }
 
+// A non-WAF 403/405 must NOT count as a circuit-breaker failure: 4xx is a
+// client-side rejection (e.g. expired API key), not an upstream outage.
+// Regression: handleWafResponse used to RecordFailure on any non-WAF
+// 403/405, so five such responses opened the circuit and 503'd all traffic.
+func TestHandlerNonWaf4xxDoesNotTripBreaker(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusMethodNotAllowed} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			cfg := testUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, `{"error":"not authorized"}`) // no WAF markers
+			}))
+			h, _, breaker, _, _ := testHandler(cfg)
+			for i := 0; i < 6; i++ {
+				rec := proxyRequest(t, h, http.MethodPost, "/v1/messages", `{"model":"m1","messages":[]}`, nil)
+				if rec.Code != status {
+					t.Fatalf("request %d: status = %d, want %d", i, rec.Code, status)
+				}
+				if breaker.IsOpen() {
+					t.Fatalf("request %d: circuit opened on a non-WAF %d", i, status)
+				}
+			}
+			if fails := breaker.ConsecutiveFails(); fails != 0 {
+				t.Errorf("breaker fails = %d, want 0 (non-WAF 4xx neither fails nor resets)", fails)
+			}
+		})
+	}
+}
+
 // Client context cancellation aborts the request without a failure response.
 func TestHandlerClientDisconnect(t *testing.T) {
 	// A body that blocks reading until released (simulates a slow/hanging

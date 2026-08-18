@@ -515,3 +515,71 @@ func TestPumpSSEMultiByteUTF8NearThinkTags(t *testing.T) {
 		t.Errorf("thinking content leaked: %q", got.out)
 	}
 }
+
+// stallWriter simulates a client that stops reading: its TCP send buffer is
+// full, so Write blocks until the per-frame write deadline set by the pump
+// fires, then returns an error (as net/http does).
+type stallWriter struct {
+	fakeResponseWriter
+	mu       sync.Mutex
+	deadline time.Time
+}
+
+func (w *stallWriter) SetWriteDeadline(t time.Time) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.deadline = t
+	return nil
+}
+
+func (w *stallWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	dl := w.deadline
+	w.mu.Unlock()
+	wait := time.Until(dl)
+	if wait <= 0 {
+		return 0, errors.New("write: i/o timeout")
+	}
+	time.Sleep(wait)
+	return 0, errors.New("write: i/o timeout")
+}
+
+// A client that stops reading must NOT wedge the pump: the write deadline
+// fails the stalled write, tears the stream down (body closed, result
+// reported) and the reader's blocked frameCh send is released.
+// Regression: OUTPUT blocked on w.Write forever, the cap-8 frameCh filled,
+// and the reader pinned on frameCh <- — the idle watchdog could not cancel
+// it, leaking the stream + upstream connection until the TCP layer gave up.
+func TestPumpSSEClientStallDoesNotWedge(t *testing.T) {
+	body := &fakeBody{}
+	// Enough data to fill the cap-8 frameCh and pin the reader on a send
+	// while the OUTPUT goroutine is stuck on the stalled Write.
+	for i := 0; i < 32; i++ {
+		body.push(fmt.Sprintf("data: chunk %d\n\n", i))
+	}
+	rw := &stallWriter{}
+	o := Options{
+		IsSSE:        true,
+		Format:       StreamAnthropic,
+		ChunkTimeout: 100 * time.Millisecond, // per-frame write deadline
+		IdleTimeout:  30 * time.Second,       // long: the write deadline must fire first
+		Log:          func(string) {},
+	}
+	start := time.Now()
+	res := PumpSSE(context.Background(), rw, body, o)
+	if res.StatusCode != http.StatusBadGateway {
+		t.Errorf("StatusCode = %d, want 502", res.StatusCode)
+	}
+	if res.Error != "client_write_failed" {
+		t.Errorf("Error = %q, want client_write_failed", res.Error)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Error("PumpSSE took too long to tear down a stalled client")
+	}
+	body.mu.Lock()
+	closed := body.closed
+	body.mu.Unlock()
+	if !closed {
+		t.Error("upstream body was not closed after client write failure")
+	}
+}
