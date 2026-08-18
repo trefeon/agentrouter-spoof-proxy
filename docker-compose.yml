@@ -10,7 +10,7 @@ services:
       - path: .env
         required: false
     healthcheck:
-      test: ["CMD", "-healthcheck"]
+      test: ["CMD", "/proxy", "-healthcheck"]
       interval: 30s
       timeout: 5s
       start_period: 5s
