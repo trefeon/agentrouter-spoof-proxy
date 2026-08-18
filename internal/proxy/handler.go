@@ -574,7 +574,13 @@ func (h *Handler) forwardNon200(w http.ResponseWriter, r *http.Request, resp *ht
 	raw, readErr := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	if readErr != nil {
-		h.Recorder.Result(model, models.ResultArgs{StatusCode: status, Error: "upstream_response_error"})
+		// Upstream died mid-body: surface as a 502 with an error body.
+		// Without this, Go's ResponseWriter emits a silent 200 empty body
+		// because no header was ever written, and the caller (9Router)
+		// interprets it as a successful but empty completion.
+		h.Log.Info(fmt.Sprintf("%s %s -> ERROR: %s (final)", method, rawPath, readErr))
+		h.Recorder.Result(model, models.ResultArgs{StatusCode: http.StatusBadGateway, Error: "upstream_response_error"})
+		h.respondJSON(w, http.StatusBadGateway, errorBody("upstream_response_error", readErr.Error()))
 		return
 	}
 	emptyOutput := ResponseHasEmptyOutput(status, raw)
@@ -631,6 +637,12 @@ func (h *Handler) streamSSE(w http.ResponseWriter, r *http.Request, resp *http.R
 // copyBody copies a non-SSE 200 body to the client and records the result.
 func (h *Handler) copyBody(w http.ResponseWriter, resp *http.Response, model string, respStart time.Time) {
 	copyStart := time.Now()
+	// Write deadline: a stalled client that stops reading fills its TCP send
+	// buffer and io.Copy blocks indefinitely. The deadline ensures the copy
+	// fails and the goroutine is released rather than pinning forever.
+	if dl := h.Cfg.ResponseTimeout(); dl > 0 {
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(dl))
+	}
 	_, _ = io.Copy(w, resp.Body)
 	_ = resp.Body.Close()
 	dur := time.Since(copyStart).Milliseconds()
