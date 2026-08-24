@@ -1,4 +1,4 @@
-# docker-compose.override.yml — local overrides (git-ignored)
+# docker-compose.override.yml, local overrides (git-ignored)
 #
 # Copy this file to docker-compose.override.yml and edit as needed.
 # Docker Compose automatically merges it with docker-compose.yml.
