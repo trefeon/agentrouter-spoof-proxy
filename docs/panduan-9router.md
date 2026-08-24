@@ -2,7 +2,7 @@
 
 **Bahasa Indonesia**
 
-> Dokumen ini menjelaskan cara menggunakan **AgentRouter Spoof Proxy** sebagai *middleware* di belakang **9Router** untuk menembus (*bypass*) limitasi WAF/cookie dari **agentrouter.org**.
+> Dokumen ini menjelaskan cara memakai **AgentRouter Spoof Proxy** sebagai *middleware* di belakang **9Router** untuk melewati limitasi WAF dan cookie dari **agentrouter.org**.
 
 ---
 
@@ -18,28 +18,28 @@
 ```
 
 **Alur:**
-1. Client AI (opencode, Cursor, dll) mengirim request ke 9Router
-2. 9Router meneruskan ke agentrouter-proxy (`localhost:8318`)
-3. agentrouter-proxy menyisipkan header palsu (spoof headers) dan cookie WAF
+1. Client AI (opencode, Cursor, dll) kirim request ke 9Router
+2. 9Router teruskan ke agentrouter-proxy (`localhost:8318`)
+3. Proxy sisipkan header spoof dan cookie WAF
 4. Request diteruskan ke `agentrouter.org` (upstream asli)
-5. Response streaming SSE dikembalikan ke client
+5. Response SSE di-stream balik ke client
 
 ---
 
 ## Kenapa Perlu Middleware?
 
-**agentrouter.org** menggunakan:
-- **WAF (Web Application Firewall)** dari Alibaba Cloud — butuh cookie `acw_tc` yang di-refresh berkala
-- **Deteksi User-Agent** — hanya klien resmi (Claude Code) yang dilayani
+**agentrouter.org** pakai:
+- **WAF (Web Application Firewall)** dari Alibaba Cloud, butuh cookie `acw_tc` yang di-refresh berkala
+- **Deteksi User-Agent**, cuma klien resmi (Claude Code) yang dilayani
 - **Rate limiting** per channel
 
-**AgentRouter Spoof Proxy** menangani semua itu:
-- Memperbarui cookie WAF setiap 3 menit
-- Menyamar sebagai Claude Code CLI
+**Proxy ini yang menangani:**
+- Refresh cookie WAF tiap 3 menit
+- Menyamar jadi Claude Code CLI
 - Retry otomatis jika kena blokir WAF
 - Circuit breaker jika upstream bermasalah
 
-Dengan menaruh proxy ini di **belakang 9Router**, kamu bisa:
+Kalau proxy ditaruh di belakang 9Router, kamu dapat:
 - Memakai satu API key untuk banyak model
 - Load balancing antar model
 - Fallback ke provider lain jika agentrouter down
@@ -51,17 +51,17 @@ Dengan menaruh proxy ini di **belakang 9Router**, kamu bisa:
 | Komponen | Minimal |
 |----------|---------|
 | Docker | `docker --version` |
-| Go 1.26+ (hanya untuk build dari source) | `go version` |
+| Go 1.26+ (cuma kalau build dari source) | `go version` |
 | 9Router | Sudah terinstall dan berjalan |
 | API Key | Dari akun agentrouter.org |
 
-> **Linux / Windows:** Tutorial ini support kedua platform. Bagian yang berbeda akan ditandai dengan catatan khusus.
+> **Linux / Windows:** Panduan ini jalan di dua platform. Kalau ada step yang beda, ada catatan khususnya.
 
 ---
 
-## Langkah 1 — Deploy AgentRouter Spoof Proxy
+## Langkah 1: Deploy AgentRouter Spoof Proxy
 
-### Opsi A — Docker Compose (Rekomendasi)
+### Opsi A: Docker Compose (Rekomendasi)
 
 ```bash
 git clone https://github.com/trefeon/agentrouter-spoof-proxy.git
@@ -72,9 +72,9 @@ docker compose up -d --build
 
 > **Windows (PowerShell):** Ganti `cp` dengan `copy` atau `Copy-Item .env.example .env`.
 
-### Opsi B — Binary Langsung (Tanpa Docker)
+### Opsi B: Binary Langsung (Tanpa Docker)
 
-> **Rekomendasi:** Pakai **systemd** sebagai process manager (Linux) — proxy otomatis restart jika crash atau server reboot. Di Windows pakai Windows Service (`sc.exe`).
+> **Rekomendasi:** Di Linux pakai **systemd** biar proxy auto restart kalau crash atau server reboot. Di Windows pakai Windows Service (`sc.exe`).
 
 #### 1. Install lewat installer (otomatis)
 
@@ -82,9 +82,9 @@ docker compose up -d --build
 curl -fsSL https://raw.githubusercontent.com/trefeon/agentrouter-spoof-proxy/main/scripts/install.sh | bash -s -- --systemd
 ```
 
-Installer akan: download prebuilt binary dari GitHub Releases (atau build dari source jika belum ada release), buat `/etc/agentrouter-proxy.env`, dan daftarkan service systemd. Alternatif manual:
+Installer akan download binary siap pakai dari GitHub Releases (atau build dari source kalau belum ada release), membuat `/etc/agentrouter-proxy.env`, dan mendaftarkan service systemd. Alternatif manual di bawah.
 
-#### 2. Manual — download binary + systemd
+#### 2. Manual: download binary + systemd
 
 ```bash
 git clone https://github.com/trefeon/agentrouter-spoof-proxy.git
@@ -95,7 +95,7 @@ cp deploy/agentrouter-proxy.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now agentrouter-proxy
 ```
 
-> **Windows (PowerShell):** Ganti `cp` dengan `copy`. Install service: `sc.exe create agentrouter-proxy binPath= "C:\path\agentrouter-proxy.exe" start= auto`.
+> **Windows (PowerShell):** Ganti `cp` jadi `copy`. Untuk service: `sc.exe create agentrouter-proxy binPath= "C:\path\agentrouter-proxy.exe" start= auto`.
 
 #### Perintah systemd sehari-hari
 
@@ -108,15 +108,15 @@ systemctl daemon-reload && systemctl enable --now agentrouter-proxy
 
 ---
 
-## Langkah 2 — Verifikasi Proxy
+## Langkah 2: Verifikasi Proxy
 
-Tunggu beberapa detik sampai WAF warmup selesai, lalu cek:
+Tunggu beberapa detik biar warmup WAF selesai, lalu cek:
 
 ```bash
 curl http://localhost:8318/health
 ```
 
-> **Windows (PowerShell):** Pakai `curl.exe http://localhost:8318/health` (bukan `curl` karena di PowerShell `curl` adalah alias untuk `Invoke-WebRequest`). Alternatif: `iwr http://localhost:8318/health`.
+> **Windows (PowerShell):** Pakai `curl.exe http://localhost:8318/health` (di PowerShell `curl` itu alias `Invoke-WebRequest`). Alternatif: `iwr http://localhost:8318/health`.
 
 Hasil yang diharapkan:
 
@@ -135,17 +135,17 @@ Hasil yang diharapkan:
 }
 ```
 
-> Jika `wafCookie: false`, tunggu 5 detik dan coba lagi. Proxy sedang mengambil cookie WAF dari agentrouter.org.
+> Kalau `wafCookie: false`, tunggu 5 detik lalu coba lagi. Proxy lagi ambil cookie WAF dari agentrouter.org.
 
 ---
 
-## Langkah 3 — Hubungkan ke Jaringan 9Router
+## Langkah 3: Hubungkan ke Jaringan 9Router
 
-Langkah ini **tergantung cara deploy** di Langkah 1:
+Langkah ini tergantung cara deploy di Langkah 1.
 
 ### Jika pakai Docker (Opsi A)
 
-Agar 9Router bisa berkomunikasi dengan proxy, keduanya harus berada di **jaringan Docker yang sama**.
+Biar 9Router bisa terhubung ke proxy, keduanya harus di jaringan Docker yang sama.
 
 Cek nama jaringan 9Router:
 
@@ -155,13 +155,13 @@ docker network ls
 
 Cari jaringan 9Router (biasanya `9router-net` atau `9router_default`).
 
-#### Opsi 1 — Sambungkan container proxy yang sudah jalan:
+#### Opsi 1: Sambungkan container proxy yang sudah jalan:
 
 ```bash
 docker network connect 9router-net agentrouter-proxy
 ```
 
-#### Opsi 2 — Atur jaringan sebelum start pakai `docker-compose.override.yml`:
+#### Opsi 2: Atur jaringan sebelum start pakai `docker-compose.override.yml`:
 
 ```bash
 cp docker-compose.override.yml.example docker-compose.override.yml
@@ -191,69 +191,69 @@ docker compose up -d
 
 ### Jika pakai binary langsung (Opsi B)
 
-9Router dan proxy sama-sama di host — **tidak perlu setup jaringan**. Cukup pastikan 9Router mengarah ke:
+Kalau dua-duanya jalan di host, tidak perlu setup jaringan. Cukup arahkan 9Router ke:
 
 ```
 Base URL: http://localhost:8318/v1
 ```
 
-Karena keduanya di host yang sama, sudah bisa komunikasi via `localhost`.
+Keduanya di host yang sama, jadi langsung terhubung lewat `localhost`.
 
-> **Catatan Windows:** Jika 9Router jalan di Docker (Docker Desktop) dan proxy jalan langsung di Windows, akses proxy dari 9Router pakai `http://host.docker.internal:8318/v1`, bukan `localhost`. Ini karena container Docker di Windows/Mac tidak bisa akses `localhost` host secara langsung — `host.docker.internal` adalah DNS khusus yang resolve ke IP host.
+> **Catatan Windows:** Kalau 9Router jalan di Docker (Docker Desktop) sedangkan proxy jalan langsung di Windows, akses proxy dari 9Router pakai `http://host.docker.internal:8318/v1`, bukan `localhost`. Container Docker di Windows/Mac tidak bisa akses `localhost` host secara langsung, `host.docker.internal` itu DNS khusus yang resolve ke IP host.
 
 ---
 
-## Langkah 4 — Konfigurasi 9Router
+## Langkah 4: Konfigurasi 9Router
 
-### 4.1 — Tambah Provider Baru
+### 4.1: Tambah Provider Baru
 
 1. Buka dashboard 9Router
 2. Masuk ke menu **Providers**
 3. Klik **Add Provider**
 4. Pilih **Add OpenAI Compatible** (yang *Custom*)
 
-### 4.2 — Isi Konfigurasi Provider
+### 4.2: Isi Konfigurasi Provider
 
-Isi form dengan:
+Isi form seperti ini:
 
 | Field | Isi |
 |-------|-----|
-| **Name** | Terserah, misal: `AgentRouter` |
-| **Prefix** | `AG` (singkatan AgentRouter — untuk prefix model ID) |
+| **Name** | Bebas, contoh: `AgentRouter` |
+| **Prefix** | `AG` (singkatan AgentRouter, buat prefix model ID) |
 | **API Type** | `chat completions` |
 | **Base URL** | `http://localhost:8318/v1` |
 
-> **Catatan:** Base URL pakai `localhost:8318` karena proxy berjalan di host yang sama. Jika proxy di server lain, ganti `localhost` dengan IP server proxy.
+> **Catatan:** Base URL pakai `localhost:8318` karena proxy jalan di host yang sama. Kalau proxy di server lain, ganti `localhost` dengan IP server proxy.
 >
-> **Windows (Docker Desktop):** Jika proxy jalan langsung di Windows dan 9Router di Docker, pakai `http://host.docker.internal:8318/v1` sebagai Base URL.
+> **Windows (Docker Desktop):** Kalau proxy jalan langsung di Windows dan 9Router di Docker, pakai `http://host.docker.internal:8318/v1` sebagai Base URL.
 
-### 4.3 — Import Model dari /models
+### 4.3: Import Model dari /models
 
-1. Setelah provider tersimpan, cari tombol **Import from /models** (atau sejenisnya)
-2. Klik tombol tersebut
-3. 9Router akan memanggil `http://localhost:8318/v1/models` dan otomatis mengambil daftar model
+1. Setelah provider kesimpan, cari tombol **Import from /models** (atau sejenisnya)
+2. Klik
+3. 9Router akan panggil `http://localhost:8318/v1/models` dan ambil daftar model otomatis
 
 Model yang akan muncul:
 - `gpt-5.6-sol`
 - `claude-opus-5`
 - `claude-opus-4-8`
 
-Jika mengaktifkan **Model Auto-Discovery** (dengan `AR_API_KEY`), model yang tampil akan sesuai dengan akun agentrouter.org kamu.
+Kalau kamu aktifkan **Model Auto-Discovery** (pakai `AR_API_KEY`), daftar model akan mengikuti akun agentrouter.org kamu, jadi selalu update.
 
-### 4.4 — Tambah API Key ke Provider
+### 4.4: Tambah API Key ke Provider
 
-> **PENTING:** API key agentrouter.org **hanya** dimasukkan ke 9Router, **bukan** ke proxy.
+> **PENTING:** API key agentrouter.org cuma dimasukin ke 9Router, bukan ke proxy.
 
 1. Di halaman provider yang baru dibuat, cari bagian **API Keys**
 2. Klik **Add API Key**
 3. Masukkan API Key dari akun agentrouter.org kamu
 4. Simpan
 
-9Router akan menggunakan API key ini saat mengirim request ke proxy. Proxy akan meneruskannya ke agentrouter.org tanpa perlu tahu API key-nya.
+9Router yang akan pakai API key ini tiap kirim request ke proxy. Proxy tinggal terusin ke agentrouter.org tanpa perlu tau key-nya.
 
 ---
 
-## Langkah 5 — Verifikasi Integrasi
+## Langkah 5: Verifikasi Integrasi
 
 ### Test dari 9Router:
 
@@ -270,7 +270,7 @@ curl http://localhost:9ROUTER_PORT/v1/chat/completions \
 
 > Ganti `9ROUTER_PORT` dengan port 9Router kamu, dan `API_KEY_9ROUTER` dengan API key dari 9Router.
 >
-> Prefix `AG-` harus ditambahkan karena 9Router menggunakan prefix untuk routing ke provider yang benar.
+> Prefix `AG-` wajib ditambah karena 9Router pakai prefix buat routing ke provider yang benar.
 
 ### Test Langsung ke Proxy (Lewati 9Router):
 
@@ -288,7 +288,7 @@ curl http://localhost:8318/v1/messages \
 
 ---
 
-## Langkah 6 — Konfigurasi opencode / Cursor
+## Langkah 6: Konfigurasi opencode / Cursor
 
 ### opencode
 
@@ -344,14 +344,14 @@ Masukkan API key 9Router (bukan API key agentrouter).
 
 ## Keamanan Deployment
 
-Versi terbaru proxy punya batasan permukaan yang lebih aman:
+Versi terbaru proxy lebih ketat soal permukaan yang di-expose:
 
-- **Bind address default `127.0.0.1`** — di host, proxy cuma bisa diakses dari lokal. Untuk akses Docker-to-Docker atau remote, set `LISTEN_ADDRESS=0.0.0.0` di `.env`.
-- **Hanya rutinitas API yang di-proxy** — `/v1/messages`, `/messages`, `/v1/chat/completions`. Path lain dikembalikan `404` lokal, method selain POST dikembalikan `405`. Tidak ada path yang bocor ke upstream.
-- **Auth opsional** — jika set `PROXY_AUTH_TOKEN`, setiap request proxied wajib membawa token via `Authorization: Bearer <token>` atau `X-Proxy-Token: <token>`, dibandingkan constant-time, dan **tidak pernah di-log**. `/health` dan `/v1/models` tetap terbuka (tanpa secret) supaya probe Docker/9Router jalan.
-- **Disarankan:** kalau proxy di-expose di jaringan bersama atau internet, selalu set `PROXY_AUTH_TOKEN` dan isi sebagai Bearer token di 9Router.
+- **Bind address default `127.0.0.1`**, di host cuma bisa diakses dari lokal. Kalau butuh akses Docker ke Docker atau remote, set `LISTEN_ADDRESS=0.0.0.0` di `.env`.
+- **Cuma tiga route yang di-proxy**: `/v1/messages`, `/messages`, `/v1/chat/completions`. Path lain dibalas `404` lokal, method selain POST dibalas `405`. Tidak ada path yang bocor ke upstream.
+- **Auth opsional**, kalau set `PROXY_AUTH_TOKEN`, setiap request yang di-proxy wajib bawa token lewat `Authorization: Bearer <token>` atau `X-Proxy-Token: <token>`. Dibandingin pakai constant-time dan tidak pernah di-log. `/health` dan `/v1/models` tetap terbuka tanpa secret biar probe Docker atau 9Router tetap jalan.
+- Kalau proxy ke-expose di jaringan bersama atau internet, selalu set `PROXY_AUTH_TOKEN` dan isi sebagai Bearer token di 9Router.
 
-Contoh `.env` untuk akses remote yang aman:
+Contoh `.env` buat akses remote yang aman:
 
 ```env
 LISTEN_ADDRESS=0.0.0.0
@@ -369,8 +369,8 @@ PROXY_AUTH_TOKEN=GANTI_DENGAN_TOKEN_RAHASIA_PANJANG
 | `NoChannelError` (503) | Tidak ada channel untuk model itu | Coba model lain atau retry |
 | 403 pada request | WAF block atau kuota habis | WAF: di-retry otomatis. Kuota: ganti model |
 | 502/504 | Timeout dari upstream | Cek jaringan, naikkan `REQUEST_TIMEOUT_MS` / `RESPONSE_TIMEOUT_MS` |
-| 429 | Rate limit TPM | Tunggu dan retry (model di-lock sementara, global pindah ke model lain) |
-| Streaming kepotong di tengah | Dulu bukan bug proxy | Sekarang tidak mungkin dipotong selama koneksi upstream masih hidup; kalau tetap, cek log `SLOW STREAM`/`IDLE TIMEOUT` |
+| 429 | Rate limit TPM | Tunggu dan retry (model di-lock sementara) |
+| Streaming kepotong di tengah | Bukan bug proxy lagi | Sekarang stream tidak kepotong selama koneksi upstream hidup. Kalau masih kepotong, cek log `SLOW STREAM` atau `IDLE TIMEOUT` |
 | 413 | Body request > 20MB | Kurangi ukuran body; body tidak pernah diteruskan ke upstream |
 | 408 | Upload body macet | Client berhenti upload; batas `BODY_UPLOAD_TIMEOUT_MS` |
 
@@ -378,8 +378,8 @@ PROXY_AUTH_TOKEN=GANTI_DENGAN_TOKEN_RAHASIA_PANJANG
 
 ## Tips
 
-- **API key agentrouter cukup dimasukkan di 9Router** — proxy tidak perlu tahu API key
-- **Proxy bisa dipakai tanpa 9Router** — langsung `curl` ke `localhost:8318/v1/messages`
-- **Jika 9Router dan proxy di server berbeda**, ganti `localhost` dengan IP server proxy
-- **Aktifkan `LOG_LEVEL=debug`** di `.env` jika ingin melihat log detail (chunk, timing, dll)
-- **Gunakan `AR_API_KEY`** untuk auto-discovery model, agar model selalu up-to-date
+- **API key agentrouter cukup di 9Router**, proxy tidak perlu tau
+- **Proxy bisa dipakai tanpa 9Router**, langsung `curl` ke `localhost:8318/v1/messages`
+- **Kalau 9Router dan proxy beda server**, ganti `localhost` dengan IP server proxy
+- **Nyalain `LOG_LEVEL=debug`** di `.env` kalau mau lihat log detail (chunk, timing, dll)
+- **Pakai `AR_API_KEY`** buat auto-discovery model biar daftar model selalu update

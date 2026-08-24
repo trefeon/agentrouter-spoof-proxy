@@ -17,7 +17,7 @@ func TestTerminalMarkers(t *testing.T) {
 	}
 }
 
-// EomTail strings are byte-for-byte contracts — assert against literals.
+// EomTail strings are byte-for-byte contracts, assert against literals.
 func TestEomTail(t *testing.T) {
 	cases := []struct {
 		name   string

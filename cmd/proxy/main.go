@@ -1,9 +1,9 @@
-// Command proxy is the AgentRouter spoof proxy — a fast, cross-platform
-// reverse proxy that spoofs Claude Code headers, maintains WAF cookies, and
-// streams SSE responses from the upstream LLM gateway.
+// Command proxy is the AgentRouter spoof proxy. A fast, cross-platform
+// reverse proxy that spoofs Claude Code headers, keeps WAF cookies and
+// streams SSE responses from the upstream gateway.
 //
-// This is the thin entry point (the Go equivalent of proxy.mjs): config
-// validation, HTTP server, scheduler loops and graceful shutdown.
+// Thin entry point, Go equivalent of proxy.mjs. It validates config,
+// starts the HTTP server and schedulers and handles graceful shutdown.
 package main
 
 import (
@@ -26,13 +26,13 @@ import (
 )
 
 func main() {
-	// -healthcheck: probe the local /health endpoint and exit 0/1. Used as the
-	// Docker HEALTHCHECK (distroless images have no shell/wget).
+	// -healthcheck probes local /health and exits 0 or 1. Used as Docker
+	// HEALTHCHECK, distroless has no shell or wget.
 	healthcheck := flag.Bool("healthcheck", false, "probe /health and exit 0 on 200")
 	flag.Parse()
 
-	// Fail fast on invalid environment values before the server or any
-	// scheduler starts (mirrors proxy.mjs validateConfig fail-fast).
+	// Fail fast on bad env values before starting server or schedulers.
+	// Mirrors proxy.mjs validateConfig.
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("invalid configuration", "error", err)
@@ -56,8 +56,8 @@ func main() {
 	slog.Info(fmt.Sprintf("AgentRouter proxy listening on %s:%d, target=%s",
 		cfg.ListenAddr, cfg.ListenPort, cfg.Upstream()))
 
-	// Graceful shutdown on SIGINT/SIGTERM (proxy.mjs shutdown(): drain active
-	// streams, force-exit after 15s).
+	// Graceful shutdown on SIGINT or SIGTERM. Mirrors proxy.mjs shutdown,
+	// drains active streams and forces exit after 15s.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -82,8 +82,8 @@ func main() {
 	}
 }
 
-// runHealthcheck GETs the local /health endpoint and returns an exit code:
-// 0 when the proxy answers 200, 1 otherwise. Used by the Docker HEALTHCHECK.
+// runHealthcheck GETs local /health and returns 0 on 200, 1 otherwise.
+// Used by Docker HEALTHCHECK.
 func runHealthcheck(cfg *config.Config) int {
 	url := fmt.Sprintf("http://%s/health", net.JoinHostPort(cfg.ListenAddr, strconv.Itoa(cfg.ListenPort)))
 	client := &http.Client{Timeout: 5 * time.Second}

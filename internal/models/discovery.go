@@ -1,5 +1,5 @@
-// Package models implements model discovery, health probing and per-model
-// telemetry, ported from src/models/*.mjs (behavior is the spec).
+// Package models handles model discovery, health checks and per-model
+// telemetry. Ported from src/models/*.mjs, behavior is the spec.
 package models
 
 import (
@@ -14,11 +14,11 @@ import (
 	"time"
 )
 
-// staticCreated is the epoch for statically-discovered models, matching
+// staticCreated is the epoch for static models, matching
 // src/models/discovery.mjs (1626777600).
 const staticCreated int64 = 1626777600
 
-// Model is a model entry as served by /v1/models and the /models route.
+// Model is one entry served by /v1/models and /models.
 type Model struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`
@@ -26,8 +26,8 @@ type Model struct {
 	OwnedBy string `json:"owned_by"`
 }
 
-// Discovery holds the current model list and where it came from ("static" or
-// "dynamic"), mirroring src/models/discovery.mjs.
+// Discovery holds the current model list and its source (static or dynamic).
+// Mirrors src/models/discovery.mjs.
 type Discovery struct {
 	mu         sync.RWMutex
 	list       []Model
@@ -35,8 +35,8 @@ type Discovery struct {
 	staticList []Model // snapshot of the static list, restored on any fetch failure
 }
 
-// NewDiscovery builds a Discovery seeded with the static model list (object
-// "model", created 1626777600, owned_by "agentrouter").
+// NewDiscovery seeds Discovery with the static list (object model, created
+// 1626777600, owned_by agentrouter).
 func NewDiscovery(staticIDs []string) *Discovery {
 	static := make([]Model, 0, len(staticIDs))
 	for _, id := range staticIDs {
@@ -52,7 +52,7 @@ func NewDiscovery(staticIDs []string) *Discovery {
 	return &Discovery{list: list, source: "static", staticList: static}
 }
 
-// List returns a copy of the current model list.
+// List returns a copy of the current list.
 func (d *Discovery) List() []Model {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -61,22 +61,21 @@ func (d *Discovery) List() []Model {
 	return out
 }
 
-// Source reports the model source: "static" or "dynamic".
+// Source reports where the list came from, static or dynamic.
 func (d *Discovery) Source() string {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.source
 }
 
-// Fetch attempts to refresh the model list from GET /v1/models on the
-// upstream. apiKey empty → no-op (mirrors the Node guard on AR_API_KEY).
+// Fetch refreshes the model list from GET /v1/models. Empty apiKey is a
+// no-op, mirrors the Node guard on AR_API_KEY.
 //
-// The caller's client supplies the shared Transport; a fresh client with a 15s
-// timeout is built from it. On ANY failure (transport error, non-200, bad
-// JSON, missing data array) the static list is restored and source becomes
-// "static" — matching the Node fallback. Note: a 200 with a JSON array (even
-// an empty one) is accepted as dynamic, exactly like the Node
-// `Array.isArray(data.data)` check.
+// It builds a fresh 15s client that reuses the caller's Transport. Any
+// failure (transport error, non-200, bad JSON, missing data array) restores
+// the static list and sets source to static, matching the Node fallback.
+// A 200 with a JSON array, even empty, counts as dynamic, like Node's
+// Array.isArray(data.data) check.
 func (d *Discovery) Fetch(ctx context.Context, client *http.Client, host string, port int, apiKey string) {
 	if apiKey == "" {
 		return
@@ -117,7 +116,7 @@ func (d *Discovery) Fetch(ctx context.Context, client *http.Client, host string,
 		return
 	}
 	if payload.Data == nil {
-		// 200 but unexpected shape: keep the current list/source (Node no-op).
+		// 200 but unexpected shape, keep current list and source (Node no-op).
 		return
 	}
 	list := make([]Model, 0, len(payload.Data))
@@ -147,10 +146,9 @@ func (d *Discovery) fallbackStatic() {
 	d.source = "static"
 }
 
-// upstreamURL builds an upstream request URL. Scheme inference mirrors the
-// production default (TARGET_PROTOCOL=https on TARGET_PORT=443): port 443
-// means https, anything else means http (covers TARGET_PROTOCOL=http and the
-// plain-HTTP test upstreams).
+// upstreamURL builds an upstream URL. Scheme follows the production default:
+// port 443 is https, anything else is http. That covers TARGET_PROTOCOL=http
+// and plain-HTTP test upstreams.
 func upstreamURL(host string, port int, path string) string {
 	scheme := "https"
 	if port != 443 {
@@ -159,8 +157,8 @@ func upstreamURL(host string, port int, path string) string {
 	return scheme + "://" + net.JoinHostPort(host, strconv.Itoa(port)) + path
 }
 
-// clientWithTimeout builds a fresh http.Client with the given overall timeout
-// that reuses the caller's Transport (or the default when client is nil).
+// clientWithTimeout returns a fresh client with the given timeout that
+// reuses the caller's Transport when available.
 func clientWithTimeout(client *http.Client, timeout time.Duration) *http.Client {
 	tr := http.DefaultTransport
 	if client != nil && client.Transport != nil {

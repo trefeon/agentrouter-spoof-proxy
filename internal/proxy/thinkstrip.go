@@ -110,7 +110,7 @@ func (t *ThinkStripper) Unterminated() bool {
 }
 
 // Flush handles a clean stream end. If a `<think>` span is still open it
-// returns (nil, true) — the caller must 502 and never leak the withheld
+// returns (nil, true), the caller must 502 and never leak the withheld
 // bytes. Otherwise it returns any held-back tag prefix (which never completed
 // into a real tag, so it is legitimate content) and false.
 func (t *ThinkStripper) Flush() (forward []byte, unterminated bool) {

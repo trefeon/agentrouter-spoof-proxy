@@ -1,7 +1,7 @@
-// Package config loads and validates the proxy's environment configuration.
+// Package config loads env config and validates it.
 //
-// Env var names and defaults are identical to the Node.js version (src/config.mjs)
-// so .env, docker-compose.yml and the install scripts keep working unchanged.
+// Env names and defaults match the Node version (src/config.mjs)
+// so existing .env, docker-compose.yml and install scripts keep working.
 package config
 
 import (
@@ -13,10 +13,9 @@ import (
 	"github.com/caarlos0/env/v11"
 )
 
-// Config mirrors src/config.mjs 1:1. Every field maps to one env var.
-// *_Ms fields keep the raw integer millisecond values so .env files written
-// for the Node version parse unchanged; use the Duration() helpers or
-// RequestTimeout()/etc. accessors where a time.Duration is needed.
+// Config mirrors src/config.mjs 1:1. Each field maps to one env var.
+// *_Ms fields keep raw millisecond ints so .env files from the Node version
+// parse unchanged. Use the Duration helpers when you need time.Duration.
 type Config struct {
 	ListenPort  int    `env:"LISTEN_PORT" envDefault:"8318"`
 	ListenAddr  string `env:"LISTEN_ADDRESS" envDefault:"127.0.0.1"`
@@ -45,8 +44,8 @@ type Config struct {
 	LogLevel           string `env:"LOG_LEVEL" envDefault:"info"`
 }
 
-// Load parses the environment into a Config. It does NOT validate — call
-// Validate() explicitly (cmd/proxy does both before the server starts).
+// Load parses env into Config. It does not validate. Call Validate
+// explicitly. cmd/proxy does both before starting the server.
 func Load() (*Config, error) {
 	var c Config
 	if err := env.Parse(&c); err != nil {
@@ -55,8 +54,8 @@ func Load() (*Config, error) {
 	return &c, nil
 }
 
-// Validate reproduces every check from src/config.mjs validateConfig() with
-// the same messages: fail fast before the server or any scheduler starts.
+// Validate checks every rule from src/config.mjs validateConfig with the same
+// messages. It fails fast before the server or schedulers start.
 func (c *Config) Validate() error {
 	checks := []struct {
 		name, expected string
@@ -75,24 +74,24 @@ func (c *Config) Validate() error {
 		{"DISCOVERY_INTERVAL_MS", "positive integer (ms)", c.DiscoveryIntervalMs, func() bool { return c.DiscoveryIntervalMs > 0 }},
 		{"MAX_RETRIES", "integer >= 0", c.MaxRetries, func() bool { return c.MaxRetries >= 0 }},
 		{"RETRY_DELAY_MS", "integer >= 0 (ms)", c.RetryDelayMs, func() bool { return c.RetryDelayMs >= 0 }},
-		{"TARGET_PROTOCOL", `"http" or "https"`, c.TargetProto, func() bool { return c.TargetProto == "http" || c.TargetProto == "https" }},
+		{"TARGET_PROTOCOL", "\"http\" or \"https\"", c.TargetProto, func() bool { return c.TargetProto == "http" || c.TargetProto == "https" }},
 		{"LISTEN_ADDRESS", "non-empty IP/hostname", c.ListenAddr, func() bool { return c.ListenAddr != "" }},
 	}
 	for _, ch := range checks {
 		if !ch.ok() {
-			return fmt.Errorf("Invalid configuration: %s=%q — expected %s. Check your .env / environment variables and restart.", ch.name, fmt.Sprint(ch.value), ch.expected)
+			return fmt.Errorf("Invalid configuration: %s=%q, expected %s. Check your .env / environment variables and restart.", ch.name, fmt.Sprint(ch.value), ch.expected)
 		}
 	}
 	return nil
 }
 
-// Upstream string used by the /health payload: "host:port".
+// Upstream returns "host:port" for the /health payload.
 func (c *Config) Upstream() string {
 	return fmt.Sprintf("%s:%d", c.TargetHost, c.TargetPort)
 }
 
-// StaticModelIDs splits MODELS_CSV into trimmed ids (used when AR_API_KEY is
-// unset or dynamic discovery fails). Mirrors discovery.mjs STATIC_MODELS.
+// StaticModelIDs splits MODELS_CSV into trimmed IDs. Used when AR_API_KEY is
+// unset or discovery fails. Mirrors discovery.mjs STATIC_MODELS.
 func (c *Config) StaticModelIDs() []string {
 	var ids []string
 	for _, id := range strings.Split(c.ModelsCSV, ",") {
@@ -103,11 +102,10 @@ func (c *Config) StaticModelIDs() []string {
 	return ids
 }
 
-// Debug reports whether LOG_LEVEL == "debug" (mirrors src/logger.mjs IS_DEBUG).
+// Debug reports whether LOG_LEVEL is debug. Mirrors src/logger.mjs IS_DEBUG.
 func (c *Config) Debug() bool { return c.LogLevel == "debug" }
 
-// Duration accessors for the millisecond fields.
-
+// Duration helpers for the millisecond fields.
 func (c *Config) RequestTimeout() time.Duration  { return ms(c.RequestTimeoutMs) }
 func (c *Config) ResponseTimeout() time.Duration { return ms(c.ResponseTimeoutMs) }
 func (c *Config) SSEIdleTimeout() time.Duration  { return ms(c.SSEIdleTimeoutMs) }
@@ -125,8 +123,8 @@ func (c *Config) RetryDelay() time.Duration { return ms(c.RetryDelayMs) }
 func ms(v int) time.Duration { return time.Duration(v) * time.Millisecond }
 
 // Transport mirrors the Node http.Agent pool (src/config.mjs AGENT):
-// keepAlive, maxSockets 64, maxFreeSockets 16. HTTP/1.1 only (like Node's
-// http.Agent) — no HTTP/2, which avoids SSE buffering/streaming surprises.
+// keepAlive, maxSockets 64, maxFreeSockets 16. HTTP/1.1 only, like Node's
+// http.Agent, no HTTP/2. That avoids SSE buffering surprises.
 func (c *Config) Transport() *http.Transport {
 	return &http.Transport{
 		MaxConnsPerHost:     64,

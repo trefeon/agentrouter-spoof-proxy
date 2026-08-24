@@ -53,7 +53,7 @@ func mockUpstream(t *testing.T) *httptest.Server {
 	t.Helper()
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/" {
-			// Warmup GET / — respond 200 so the warmup scheduler succeeds fast.
+			// Warmup GET slash, respond 200 so the warmup scheduler succeeds fast.
 			w.Header().Set("Content-Type", "text/plain")
 			_, _ = io.WriteString(w, "ok")
 			return

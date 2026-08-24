@@ -1,6 +1,6 @@
-# AgentRouter Spoof Proxy — Windows One-Click Installer
+# AgentRouter Spoof Proxy, Windows installer
 # SECURITY NOTE: this installer downloads and executes remote code over TLS
-# (GitHub releases, go.dev, Docker Desktop). Review the script before piping it
+# from GitHub releases, go.dev and Docker Desktop. Review it before piping
 # from the internet: https://github.com/trefeon/agentrouter-spoof-proxy/blob/main/scripts/install.ps1
 #
 # Usage:
@@ -17,9 +17,8 @@
 #   -DryRun         Print what would happen without changing system
 #   -InstallDir     Install directory (default: ~\agentrouter-spoof-proxy)
 #
-# The proxy is a single static Go binary. A prebuilt binary is downloaded from
-# GitHub releases when available; otherwise it is built from source, which
-# requires Go 1.26+.
+# Proxy is a single static Go binary. Prebuilt binary is downloaded from
+# GitHub releases when available, otherwise built from source. Requires Go 1.26+.
 
 param(
   [switch]$Docker,
@@ -67,7 +66,7 @@ function Confirm-Step {
   return $false
 }
 
-# ── Go toolchain detection (1.26+ required for source builds) ──
+# Go toolchain check, 1.26+ required for source builds
 function Test-Go {
   try {
     $goVer = (go version) -replace '.*go(\d+)\.(\d+).*', '$1.$2'
@@ -85,7 +84,7 @@ function Install-Go {
   if ($Yes) {
     Write-Info "Attempting install via winget..."
     Run-Step "winget install GoLang.Go" { winget install GoLang.Go -e --accept-source-agreements --accept-package-agreements }
-    # winget updates the registry PATH; the current session's $env:Path is stale.
+    # winget updates registry PATH, current session $env:Path is stale.
     $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
     if (-not (Test-Go)) {
       Write-Fail "Go was installed but is not on PATH yet. Open a new terminal and rerun the installer."
@@ -98,7 +97,7 @@ function Install-Go {
   return $false
 }
 
-# Build the binary from source in $InstallDir (Step B).
+# Build binary from source in $InstallDir.
 function Build-Source {
   param([string]$Dest)
   $src = $InstallDir
@@ -135,7 +134,7 @@ function Build-Source {
   return $true
 }
 
-# Step A -> B -> C: download prebuilt, fall back to source build.
+# Try prebuilt binary first, fall back to source build.
 function Get-Binary {
   param([string]$Dest)
   $url = "$releasesUrl/$version/download/agentrouter-proxy.exe"
@@ -159,7 +158,7 @@ function Get-Binary {
   return (Build-Source $Dest)
 }
 
-# ── Health verification: poll up to ~15s for {"ok":true} ──
+# Health check, poll up to 15s for ok:true
 function Test-Health {
   if ($DryRun) {
     Write-Info "DRY-RUN: poll http://127.0.0.1:8318/health up to 15s; expect ok=true"
@@ -192,7 +191,7 @@ function Test-Admin {
   return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-Write-Info "AgentRouter Spoof Proxy — Windows Installer"
+Write-Info "AgentRouter Spoof Proxy, Windows Installer"
 Write-Info "--------------------------------------------"
 Write-Host ""
 if ($DryRun) { Write-Warn "Dry-run mode enabled; no changes will be made." }
@@ -216,7 +215,7 @@ if ($Help) {
   exit 0
 }
 
-# ── Detect Docker (optional) ──
+# Check for Docker, optional
 $hasDocker = $false
 try {
   docker --version | Out-Null
@@ -224,7 +223,7 @@ try {
   $hasDocker = $true
 } catch {}
 
-# ── Clone or download repo ──
+# Clone or download repo
 if ((Test-Path (Join-Path $InstallDir "go.mod")) -and (Test-Path (Join-Path $InstallDir "cmd\proxy"))) {
   Write-Info "Found project at $InstallDir"
   Set-Location $InstallDir
@@ -278,7 +277,7 @@ if ((Test-Path (Join-Path $InstallDir "go.mod")) -and (Test-Path (Join-Path $Ins
   }
 }
 
-# ── Pick method ──
+# Pick run method
 if ($Docker) { $method = "docker" }
 elseif ($Service -or $PM2) {
   if ($PM2 -and -not $Service) { Write-Warn "-PM2 is deprecated; use -Service instead (behavior unchanged)." }
@@ -303,7 +302,7 @@ else {
   }
 }
 
-# ── Setup .env ──
+# Setup .env
 if (-not (Test-Path ".env")) {
   if ($DryRun) {
     Write-Info "DRY-RUN: Copy-Item .env.example .env"
@@ -313,7 +312,7 @@ if (-not (Test-Path ".env")) {
   }
 }
 
-# ── Method runners ──
+# Run selected method
 switch ($method) {
   "docker" {
     if (-not $hasDocker) {
@@ -327,7 +326,7 @@ switch ($method) {
       Write-Fail "Docker is required for this method. Choose Service or Direct."
       pause; exit 1
     }
-    # Native exit codes do not throw in PowerShell — check $LASTEXITCODE explicitly.
+    # Native exit codes do not throw in PowerShell, check $LASTEXITCODE explicitly.
     docker compose version | Out-Null
     if ($LASTEXITCODE -ne 0) {
       Write-Fail "Docker is installed but the compose plugin is missing. Update Docker Desktop (Compose v2 is bundled)."

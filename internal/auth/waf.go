@@ -13,9 +13,9 @@ import (
 	"time"
 )
 
-// wafCookieNames is the allowlist of WAF/edge session-cookie names. Set-Cookie
-// entries with any other name are treated as non-WAF (browser/app cookies) and
-// never shipped upstream. Mirrors WAF_COOKIE_NAMES in src/auth/waf.mjs.
+// wafCookieNames is the allowlist of WAF and edge session cookies. Only these
+// names are forwarded upstream. Everything else is ignored. Mirrors
+// WAF_COOKIE_NAMES in src/auth/waf.mjs.
 var wafCookieNames = map[string]struct{}{
 	"acw_tc":     {},
 	"acw_sc__v2": {},
@@ -23,8 +23,8 @@ var wafCookieNames = map[string]struct{}{
 	"cdn_sec_tc": {},
 }
 
-// warmupHeaders mirrors WARMUP_HEADERS in src/auth/waf.mjs: the browser-ish
-// header set sent on the warmup GET "/" so the WAF issues its challenge cookie.
+// warmupHeaders is the browser-like header set sent on GET / warmup so the
+// WAF issues its challenge cookie. Mirrors WARMUP_HEADERS in src/auth/waf.mjs.
 var warmupHeaders = map[string]string{
 	"User-Agent":                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 	"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -38,17 +38,16 @@ var warmupHeaders = map[string]string{
 	"Sec-Fetch-User":            "?1",
 }
 
-// warmupBackoff is the sleep between warmup attempts (1s, 2s, mirroring
-// `sleep(1000 * (attempt + 1))`). A package variable so tests can shorten it.
+// warmupBackoff sleeps between warmup attempts (1s, then 2s, mirroring
+// sleep(1000 * (attempt + 1))). Package var so tests can shorten it.
 var warmupBackoff = []time.Duration{time.Second, 2 * time.Second}
 
-// ExtractWafCookies parses set-cookie header values and returns the valid WAF
-// cookies as "name=value" strings (src/auth/waf.mjs extractWafCookies).
+// ExtractWafCookies parses Set-Cookie values and returns valid WAF cookies as
+// "name=value" strings (src/auth/waf.mjs extractWafCookies).
 //
-// Expired/cleared cookies (`name=; max-age=0`) and entries without a `=` are
-// skipped: an empty value must never be shipped inside the Cookie header —
-// the upstream WAF would read it as a *failed* challenge (worse than no
-// cookie at all).
+// Expired or cleared cookies (name=, max-age=0) and entries without "=" are
+// skipped. An empty value must never be sent in Cookie, the upstream WAF
+// treats it as a failed challenge, which is worse than sending nothing.
 func ExtractWafCookies(setCookieValues []string) []string {
 	var waf []string
 	for _, c := range setCookieValues {
@@ -73,9 +72,9 @@ func ExtractWafCookies(setCookieValues []string) []string {
 	return waf
 }
 
-// MergeWafCookies merges cookie lists keyed by cookie NAME: a fresh value
-// replaces the old one for the same name while unrelated names are preserved
-// (src/auth/waf.mjs mergeWafCookies). Pure: neither input is modified.
+// MergeWafCookies merges cookie lists by name. A fresh value replaces the old
+// one for the same name, other names are kept. Pure, neither input is modified
+// (src/auth/waf.mjs mergeWafCookies).
 func MergeWafCookies(current, fresh []string) []string {
 	out := make([]string, 0, len(current)+len(fresh))
 	out = append(out, current...)
@@ -105,8 +104,8 @@ func MergeWafCookies(current, fresh []string) []string {
 	return out
 }
 
-// Store is the thread-safe WAF cookie holder. Warmup refreshes it against the
-// upstream "/" page and every upstream response feeds it via Capture.
+// Store holds WAF cookies safely for concurrent use. Warmup refreshes it from
+// GET / and every upstream response updates it via Capture.
 type Store struct {
 	mu      sync.RWMutex
 	cookies []string
@@ -117,9 +116,8 @@ type Store struct {
 	targetPort  int
 }
 
-// NewStore returns an empty store. The warmup target defaults to the config
-// defaults (https://agentrouter.org:443); override with SetTarget before
-// starting the warmup goroutine.
+// NewStore returns an empty store. Defaults to https://agentrouter.org:443.
+// Call SetTarget before warmup if you need a different origin.
 func NewStore() *Store {
 	return &Store{
 		targetProto: "https",
@@ -128,7 +126,7 @@ func NewStore() *Store {
 	}
 }
 
-// SetTarget configures the upstream origin used by Warmup.
+// SetTarget sets the upstream origin for Warmup.
 func (s *Store) SetTarget(proto, host string, port int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -140,25 +138,24 @@ func (s *Store) SetTarget(proto, host string, port int) {
 	s.targetPort = port
 }
 
-// Get returns the current cookies joined with "; ", or "" when empty.
+// Get returns cookies joined as "a=b; c=d", or "" if empty.
 func (s *Store) Get() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return strings.Join(s.cookies, "; ")
 }
 
-// Set replaces the entire cookie list.
+// Set replaces the cookie list.
 func (s *Store) Set(cookies []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cookies = append([]string(nil), cookies...)
 }
 
-// Capture merges any WAF cookies seen on an upstream response into the store,
-// keyed by cookie NAME. No-op when the response carries no valid WAF cookie —
-// this lets a rotated acw_tc/cdn_sec_tc on an API response be picked up
-// immediately instead of waiting for the next warmup cycle
-// (src/auth/waf.mjs captureWafCookies).
+// Capture merges WAF cookies from an upstream response into the store, keyed
+// by name. No-op if the response has no valid WAF cookie. This picks up a
+// rotated acw_tc or cdn_sec_tc from an API response right away, without
+// waiting for the next warmup (src/auth/waf.mjs captureWafCookies).
 func (s *Store) Capture(resp *http.Response) {
 	if resp == nil {
 		return
@@ -172,13 +169,11 @@ func (s *Store) Capture(resp *http.Response) {
 	s.mu.Unlock()
 }
 
-// Warmup performs the WAF warmup: up to 3 GET "/" attempts against the target
-// using a FRESH, non-pooled client (the Node agent:false equivalent — never
-// the shared Transport), 10s per attempt, 1s/2s backoff in between. Captured
-// cookies are merged — never replaced — into the store so traffic-only names
-// survive. Returns true when at least one cookie was captured, else false.
-//
-// Log lines keep the Node grep prefixes: "WARMUP → 200 cookies: N" and
+// Warmup fetches GET / up to 3 times to get WAF cookies. It uses a fresh,
+// non-pooled client (Node agent:false equivalent, never the shared Transport),
+// 10s per attempt, with 1s and 2s backoff. New cookies are merged, never
+// replaced, so traffic-only names survive. Returns true if any cookie was
+// captured. Log lines keep Node prefixes: "WARMUP -> 200 cookies: N" and
 // "WARMUP failed after 3 attempts".
 func (s *Store) Warmup(ctx context.Context) bool {
 	if ctx == nil {
@@ -214,9 +209,8 @@ func (s *Store) warmupURL() string {
 	return s.targetProto + "://" + net.JoinHostPort(s.targetHost, strconv.Itoa(s.targetPort)) + "/"
 }
 
-// warmupAttempt runs one warmup GET "/" with the browser header set and a
-// fresh client. A response is a success regardless of status code — only
-// transport errors fail the attempt.
+// warmupAttempt runs one GET / with browser headers and a fresh client.
+// Any HTTP status counts as success, only transport errors fail the attempt.
 func warmupAttempt(ctx context.Context, u string) ([]string, error) {
 	client := &http.Client{
 		Timeout:   10 * time.Second,

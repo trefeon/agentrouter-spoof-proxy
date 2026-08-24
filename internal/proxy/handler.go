@@ -81,7 +81,6 @@ func (h *Handler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 	rawPath := r.URL.RequestURI()
 	method := r.Method
 
-	// ── Body buffering (413 early, 408 upload deadline, 413 over-limit) ──
 
 	// Early Content-Length check: reject before buffering any bytes.
 	if r.ContentLength > MaxBodySize {
@@ -96,7 +95,7 @@ func (h *Handler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 			// The upload deadline fired. Go's server cancels the request
 			// context when a body read hits the read deadline (the same
 			// internal path as a client disconnect), so this must NOT be
-			// gated on r.Context().Err() — a still-connected client has to
+			// gated on r.Context().Err(), a still-connected client has to
 			// receive the 408. It also skips the bounded drain: the missing
 			// body never arrives, so draining would block the handler.
 			h.Log.Info(fmt.Sprintf("%s %s -> REJECTED %d (%s)",
@@ -112,7 +111,7 @@ func (h *Handler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 		// The request body was never fully consumed, so Go's http server
 		// will not flush the response on a keep-alive connection (it waits
 		// for the remaining body to decide connection reuse). Declaring
-		// Connection: close forces an immediate flush — mirroring the Node
+		// Connection: close forces an immediate flush, mirroring the Node
 		// rejectOversizedWithStatus drain-then-destroy behavior.
 		h.rejectBody(w, r, rejected, rejectionCode(rejected), rejectionMessage(rejected), true)
 		return
@@ -121,7 +120,6 @@ func (h *Handler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 		return // client disconnected during upload
 	}
 
-	// ── Route / summarize / spoof ──
 
 	path := RewritePath(rawPath)
 	streamFormat := StreamAnthropic
@@ -160,7 +158,6 @@ func (h *Handler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 
 	body = InjectPrompt(body, path, h.Cfg.InjectSystemPrompt)
 
-	// ── Circuit breaker ──
 
 	if h.Breaker.IsOpen() {
 		h.Log.Info(fmt.Sprintf("%s %s -> REJECTED (circuit open)", method, rawPath))
@@ -174,9 +171,7 @@ func (h *Handler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 	h.doRequest(w, r, body, path, streamFormat, summary, upstreamHeaders, model)
 }
 
-// ── Body helpers ──────────────────────────────────────────────────────────────
 
-// rejectionCode maps a rejection status to its JSON error code.
 func rejectionCode(status int) string {
 	if status == http.StatusRequestTimeout {
 		return "request_timeout"
@@ -204,7 +199,7 @@ func rejectionMessage(status int) string {
 //
 // The read deadline is deliberately NOT cleared on the rejection paths:
 // rejectBody drains and closes the body afterwards, and Go's request-body
-// Close internally drains up to 256KB — on a stalled upload that drain would
+// Close internally drains up to 256KB, on a stalled upload that drain would
 // block the handler forever unless the (now-expired) read deadline makes the
 // socket reads fail fast. rejectBody clears the deadline once the body is
 // handled.
@@ -249,8 +244,7 @@ func (h *Handler) rejectBody(w http.ResponseWriter, r *http.Request, status int,
 	_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
 }
 
-// respondJSON mirrors utils.mjs respondJson: Content-Type application/json plus
-// the CORS allow header.
+// respondJSON sends JSON with the CORS allow header, mirroring utils.mjs respondJson.
 func (h *Handler) respondJSON(w http.ResponseWriter, status int, data any) {
 	b, _ := json.Marshal(data)
 	w.Header().Set("Content-Type", "application/json")
@@ -263,8 +257,7 @@ func errorBody(code, message string) map[string]any {
 	return map[string]any{"error": map[string]any{"code": code, "message": message, "type": "proxy_error"}}
 }
 
-// summaryDebug renders the request summary for the debug log (mirrors
-// JSON.stringify(requestSummary)).
+// summaryDebug formats the request summary for debug logging.
 func summaryDebug(s RequestSummary) string {
 	b, _ := json.Marshal(map[string]any{
 		"method": s.Method, "path": s.Path, "bodyBytes": s.BodyBytes, "parseOk": s.ParseOK,
@@ -288,8 +281,7 @@ func nullIfNil[T any](v *T) any {
 	return *v
 }
 
-// sleepCtx sleeps for d, returning false early when ctx is cancelled (so retry
-// backoff aborts when the client disconnects).
+// sleepCtx sleeps for d or returns early if the context is cancelled.
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
@@ -301,7 +293,6 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// ── Retry loop ────────────────────────────────────────────────────────────────
 
 // doRequest runs the retry loop (handler.mjs l.167-440). Each iteration either
 // produces a terminal client response and returns, or continues with the next
@@ -345,7 +336,7 @@ func (h *Handler) doRequest(w http.ResponseWriter, r *http.Request, body []byte,
 			continue // WAF retried; next attempt
 		}
 
-		// 5xx retry — if exhausted, mark model unhealthy.
+		// 5xx retry, if exhausted, mark model unhealthy.
 		if IsRetryable(status, "", h.Cfg.RetryOn5xx) && attempt < h.Cfg.MaxRetries {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
@@ -406,7 +397,7 @@ func (h *Handler) doRequest(w http.ResponseWriter, r *http.Request, body []byte,
 // roundTrip performs one upstream request with an adaptive header-wait
 // deadline. The timer is stopped once the response headers arrive so the
 // deadline never applies to the streaming body. Returns timedOut=true when the
-// adaptive deadline (or a transport DeadlineExceeded) fired — the caller must
+// adaptive deadline (or a transport DeadlineExceeded) fired, the caller must
 // treat it as a timeout, never stream the body.
 func (h *Handler) roundTrip(ctx context.Context, method, url string, headers http.Header, body []byte, adaptiveTimeout time.Duration) (*http.Response, bool, error) {
 	var timedOut atomic.Bool
@@ -454,7 +445,7 @@ func (h *Handler) handleTransportError(w http.ResponseWriter, r *http.Request, m
 		msg = "timeout"
 	}
 
-	// Client disconnected while waiting for a response: abort silently — no
+	// Client disconnected while waiting for a response: abort silently, no
 	// breaker/health accounting, nothing to respond to (mirrors req.on("close")
 	// destroying the upstream without recordFailure).
 	if r.Context().Err() != nil {
@@ -502,7 +493,7 @@ func transportMessage(err error) string {
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
 		// Node's e.message for these syscall-level failures is the literal
-		// code ("ECONNRESET" / "ETIMEDOUT" / "ENETUNREACH") — a retryable
+		// code ("ECONNRESET" / "ETIMEDOUT" / "ENETUNREACH"), a retryable
 		// keyword. Go's OpError.Error() renders "connection reset by peer"
 		// etc., which the keyword scan would miss, so map back to the code.
 		switch {
@@ -652,7 +643,6 @@ func (h *Handler) copyBody(w http.ResponseWriter, resp *http.Response, model str
 	}
 }
 
-// writeHead copies filtered headers onto w and writes the status.
 func (h *Handler) writeHead(w http.ResponseWriter, status int, headers http.Header) {
 	for k, vv := range headers {
 		for _, v := range vv {
@@ -662,7 +652,6 @@ func (h *Handler) writeHead(w http.ResponseWriter, status int, headers http.Head
 	w.WriteHeader(status)
 }
 
-// writeFull copies filtered headers, writes the status and the buffered body.
 func (h *Handler) writeFull(w http.ResponseWriter, status int, headers http.Header, body []byte) {
 	for k, vv := range headers {
 		for _, v := range vv {

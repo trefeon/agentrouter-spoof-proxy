@@ -166,7 +166,6 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 		}
 	}
 
-	// ── Single-writer OUTPUT goroutine ──
 	go func() {
 		defer close(outDone)
 		rc := http.NewResponseController(w)
@@ -207,11 +206,11 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 					p = f.data
 				}
 				if err := writeFrame(p); err != nil {
-					// Client stalled/disconnected mid-stream: stop the whole
+					// Client stalled or disconnected mid-stream, stop the whole
 					// pump. Closing the body and cancelling the stream context
-					// unblocks the reader (and any in-flight upstream read);
-					// the reader's finish select sees outDone and skips the
-					// done frame — this Result is the terminal one.
+					// unblocks the reader (and any in-flight upstream read).
+					// The reader's finish select sees outDone and skips the
+					// done frame, this Result is the terminal one.
 					o.Log(fmt.Sprintf("SSE WRITE FAILED (client stalled or disconnected): %v", err))
 					_ = body.Close()
 					cancelStream()
@@ -224,7 +223,6 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 		}
 	}()
 
-	// ── Reader ──
 	classifier := NewFrameClassifier(nil, o.LogDebug)
 	thinkStripper := NewThinkStripper()
 	var openaiPending []byte
@@ -274,7 +272,6 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 		return ready
 	}
 
-	// ── Terminal handlers (run in the reader goroutine) ──
 
 	// handleCleanEnd: upstream returned io.EOF (stream.mjs 'end' handler).
 	handleCleanEnd := func() {
@@ -346,7 +343,6 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 			"client_disconnected", classifier.SawMessageStop())
 	}
 
-	// ── Reader loop ──
 	go func() {
 		defer close(streamDone)
 		br := bufio.NewReader(body)
@@ -363,11 +359,10 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 		for {
 			select {
 			case rr := <-readCh:
-				// Go's io.Reader contract allows a single Read to return
-				// n > 0 bytes together with io.EOF (the transport may coalesce
-				// the final chunk with the clean end). Process the data before
-				// acting on the terminal error — mirroring Node's separate
-				// 'data' then 'end' events.
+				// Go's io.Reader can return n > 0 with io.EOF in one call
+				// (the transport may coalesce the final chunk with the clean
+				// end). Process the data before handling the terminal error,
+				// mirroring Node's separate 'data' then 'end' events.
 				if rr.n > 0 {
 					chunkCount++
 					chunk := buff[:rr.n]
@@ -420,7 +415,6 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 		}
 	}()
 
-	// ── Keepalive goroutine (SSE only) ──
 	if o.IsSSE {
 		go func() {
 			t := time.NewTicker(o.KeepaliveInterval)
@@ -450,7 +444,6 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 		}()
 	}
 
-	// ── Watchdog goroutine (SSE only) ──
 	if o.IsSSE {
 		var stallLogged bool
 		go func() {
@@ -478,7 +471,7 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 						if !sawData.Load() {
 							kind = "no data yet"
 						}
-						o.Log(fmt.Sprintf("SLOW STREAM (%s > %gs) — keeping stream alive", kind, o.ChunkTimeout.Seconds()))
+						o.Log(fmt.Sprintf("SLOW STREAM (%s > %gs), keeping stream alive", kind, o.ChunkTimeout.Seconds()))
 					}
 				}
 			}

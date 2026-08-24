@@ -1,6 +1,5 @@
-// Package server wires the whole proxy together: the HTTP server, route
-// dispatch (health/models/proxy), schedulers (WAF warmup, model discovery,
-// health probe) and graceful shutdown. The Go equivalent of proxy.mjs.
+// Package server wires the proxy. It owns the HTTP server, route dispatch,
+// schedulers and graceful shutdown. Go equivalent of proxy.mjs.
 package server
 
 import (
@@ -25,9 +24,9 @@ import (
 	"github.com/trefeon/agentrouter-spoof-proxy/internal/resilience"
 )
 
-// Server owns the http.Server plus the scheduler lifecycle. Shutdown cancels
-// the internal context (stopping warmup/discovery/probe goroutines), drains
-// active connections, and waits for the scheduler WaitGroup.
+// Server owns the HTTP server and scheduler lifecycle. Shutdown cancels the
+// internal context, which stops warmup, discovery and probe goroutines, drains
+// connections and waits for the WaitGroup.
 type Server struct {
 	HTTP   *http.Server
 	cancel context.CancelFunc
@@ -44,9 +43,9 @@ type Server struct {
 	active    *atomic.Int64
 }
 
-// New builds the full dependency graph (mirrors proxy.mjs construction order),
-// starts the scheduler goroutines tied to an internal context, and assembles
-// the HTTP server. Call Serve to start listening and Shutdown to stop.
+// New builds the dependency graph, starts scheduler goroutines on an
+// internal context, and returns the HTTP server. Call Serve to listen and
+// Shutdown to stop. Order mirrors proxy.mjs.
 func New(cfg *config.Config) *Server {
 	level := slog.LevelInfo
 	if cfg.Debug() {
@@ -79,7 +78,7 @@ func New(cfg *config.Config) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 
-	// ── Schedulers (goroutines tied to ctx, tracked by wg) ──
+	// Schedulers, goroutines tied to ctx and tracked by wg.
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -106,20 +105,19 @@ func New(cfg *config.Config) *Server {
 		Handler:           s.mux(),
 		ReadHeaderTimeout: 30 * time.Second, // mirrors server.headersTimeout
 		IdleTimeout:       120 * time.Second,
-		// WriteTimeout deliberately unset — it would kill SSE streaming
-		// (see docs/go-migration.md §3.10).
+		// WriteTimeout is not set, it would kill SSE streaming
+		// (see docs/go-migration.md 3.10).
 	}
 	return s
 }
 
-// Serve serves HTTP on the given listener until Shutdown.
+// Serve runs HTTP on the listener until Shutdown.
 func (s *Server) Serve(ln net.Listener) error {
 	return s.HTTP.Serve(ln)
 }
 
-// Shutdown stops the schedulers, drains active connections and waits for the
-// scheduler goroutines. The provided ctx bounds the drain (mirrors proxy.mjs's
-// 15s forced-exit).
+// Shutdown stops schedulers, drains connections and waits for goroutines.
+// Context bounds the drain, mirrors proxy.mjs 15s forced exit.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.cancel()
 	err := s.HTTP.Shutdown(ctx)
@@ -127,10 +125,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return err
 }
 
-// ── Schedulers ────────────────────────────────────────────────────────────────
+// Schedulers
 
-// runWarmup mirrors scheduleWarmup: immediate warmup, then every
-// WarmupInterval.
+// runWarmup runs warmup once, then every WarmupInterval. Mirrors
+// scheduleWarmup.
 func (s *Server) runWarmup(ctx context.Context) {
 	s.wafStore.Warmup(ctx)
 	t := time.NewTicker(s.cfg.WarmupInterval())
@@ -145,8 +143,8 @@ func (s *Server) runWarmup(ctx context.Context) {
 	}
 }
 
-// runDiscovery mirrors scheduleDiscovery: only runs when AR_API_KEY is set,
-// fetching immediately then every DiscoveryInterval.
+// runDiscovery runs discovery only when AR_API_KEY is set. Fetches once,
+// then every DiscoveryInterval. Mirrors scheduleDiscovery.
 func (s *Server) runDiscovery(ctx context.Context, client *http.Client) {
 	if s.cfg.ARAPIKey == "" {
 		s.log.Info("Model discovery disabled (no AR_API_KEY set), using static list")
@@ -165,8 +163,8 @@ func (s *Server) runDiscovery(ctx context.Context, client *http.Client) {
 	}
 }
 
-// resolveDNS mirrors resolveDns: a one-shot startup DNS lookup, informational
-// only (non-fatal).
+// resolveDNS does a one-shot DNS lookup at startup. Informational only,
+// not fatal. Mirrors resolveDns.
 func (s *Server) resolveDNS(ctx context.Context) {
 	addrs, err := net.DefaultResolver.LookupHost(ctx, s.cfg.TargetHost)
 	if err != nil {
@@ -176,9 +174,9 @@ func (s *Server) resolveDNS(ctx context.Context) {
 	s.log.Info(fmt.Sprintf("DNS resolved %s → %s", s.cfg.TargetHost, strings.Join(addrs, ", ")))
 }
 
-// ── Routing ───────────────────────────────────────────────────────────────────
+// Routing
 
-// proxyRoutes is the allowlist of upstream-forwardable paths (utils.mjs
+// proxyRoutes is the allowlist of paths that proxy upstream (utils.mjs
 // PROXY_ROUTES).
 var proxyRoutes = map[string]bool{
 	"/v1/messages":         true,
@@ -191,9 +189,9 @@ func isProxyRoute(rawPath string) bool {
 	return proxyRoutes[base]
 }
 
-// mux builds the route table. Exact paths only — no trailing-slash patterns,
-// so Go 1.26's 301→307 redirect change never applies. Order matches
-// proxy.mjs: health → models → allowlist 404 → auth 401 → method 405 → proxy.
+// mux builds the route table. Exact paths only, no trailing slash patterns,
+// so Go 1.26 301 to 307 redirect never applies. Order matches proxy.mjs:
+// health, models, allowlist 404, auth 401, method 405, then proxy.
 func (s *Server) mux() http.Handler {
 	mux := http.NewServeMux()
 
@@ -202,7 +200,7 @@ func (s *Server) mux() http.Handler {
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /models", s.handleModels)
 
-	// Proxy routes: auth-gated POST handlers.
+	// Proxy routes, auth-gated POST handlers.
 	proxyH := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !requireProxyAuth(r, s.cfg.ProxyAuthToken) {
 			rejectLocally(w, r, http.StatusUnauthorized, "unauthorized", "Invalid or missing proxy auth token")
@@ -214,8 +212,7 @@ func (s *Server) mux() http.Handler {
 	mux.HandleFunc("POST /v1/chat/completions", proxyH)
 	mux.HandleFunc("POST /messages", proxyH)
 
-	// Catch-all: unknown paths, wrong methods on known routes, and health/
-	// models with a non-GET method.
+	// Catch-all for unknown paths, wrong methods and non-GET on health or models.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		rawPath := r.URL.RequestURI()
 		if !isProxyRoute(rawPath) {
@@ -236,16 +233,16 @@ func (s *Server) mux() http.Handler {
 	return mux
 }
 
-// requireProxyAuth mirrors proxy.mjs requireProxyAuth: when PROXY_AUTH_TOKEN is
-// set, the client must present it via `Authorization: Bearer <token>` or
-// `X-Proxy-Token: <token>`.
+// requireProxyAuth checks proxy auth. When PROXY_AUTH_TOKEN is set, the
+// client must send it as Authorization Bearer or X-Proxy-Token. Mirrors
+// proxy.mjs requireProxyAuth.
 func requireProxyAuth(r *http.Request, token string) bool {
 	if token == "" {
 		return true
 	}
 	var bearer string
 	if a := r.Header.Get("Authorization"); a != "" {
-		// /^Bearer\s+(.+)$/i — Bearer (any case) followed by whitespace.
+		// /^Bearer\s+(.+)$/i, Bearer (any case) followed by whitespace.
 		const prefix = "bearer"
 		if len(a) > len(prefix) && strings.EqualFold(a[:len(prefix)], prefix) && isSpace(a[len(prefix)]) {
 			bearer = strings.TrimSpace(a[len(prefix)+1:])
@@ -264,8 +261,8 @@ func isSpace(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\r' || b == '\n' || b == '\v' || b == '\f'
 }
 
-// rejectLocally mirrors proxy.mjs rejectLocally: answer the rejection JSON and
-// drain any still-arriving request body so the keep-alive socket stays clean.
+// rejectLocally sends a local error JSON and drains the request body so
+// the keep-alive socket stays clean. Mirrors proxy.mjs rejectLocally.
 func rejectLocally(w http.ResponseWriter, r *http.Request, status int, code, message string) {
 	respondJSON(w, status, map[string]any{
 		"error": map[string]any{"code": code, "message": message, "type": "proxy_error"},
@@ -275,7 +272,7 @@ func rejectLocally(w http.ResponseWriter, r *http.Request, status int, code, mes
 	}
 }
 
-// respondJSON mirrors utils.mjs respondJson.
+// respondJSON writes JSON, mirrors utils.mjs respondJson.
 func respondJSON(w http.ResponseWriter, status int, data any) {
 	b, _ := json.Marshal(data)
 	w.Header().Set("Content-Type", "application/json")
@@ -284,8 +281,8 @@ func respondJSON(w http.ResponseWriter, status int, data any) {
 	_, _ = w.Write(b)
 }
 
-// handleHealth serves GET /health and /api/health (proxy.mjs l.80-94). The
-// modelHealth payload carries the ModelStats JSON field names.
+// handleHealth serves GET /health and /api/health (proxy.mjs 80-94).
+// modelHealth uses ModelStats JSON names.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]any{
 		"ok":               true,
@@ -301,8 +298,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleModels serves GET /v1/models and /models (proxy.mjs l.97-100),
-// filtering out unhealthy models so 9Router falls back instantly.
+// handleModels serves GET /v1/models and /models (proxy.mjs 97-100).
+// It filters unhealthy models so 9Router falls back quickly.
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]any{
 		"data":   s.health.HealthyModels(s.discovery.List()),

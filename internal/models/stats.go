@@ -7,10 +7,10 @@ import (
 	"time"
 )
 
-// ModelStats is the per-model telemetry snapshot, ported from
-// src/models/stats.mjs. AvgMs/AvgChunks are derived at Snapshot time. The
-// JSON tags produce the exact Node field names served by /health
-// (getModelStats), so 9Router sees byte-compatible keys.
+// ModelStats is the per-model telemetry snapshot. Ported from
+// src/models/stats.mjs. AvgMs and AvgChunks are computed at Snapshot time.
+// JSON tags match Node field names from /health (getModelStats), so 9Router
+// sees the same keys.
 type ModelStats struct {
 	Model          string `json:"model"`
 	Requests       int    `json:"requests"`
@@ -31,7 +31,7 @@ type ModelStats struct {
 	AvgChunks      int64  `json:"avgChunks"`
 }
 
-// ResultArgs carries the outcome of one proxied request for Result.
+// ResultArgs is the input for Recorder.Result.
 type ResultArgs struct {
 	StatusCode  int
 	DurationMs  int64
@@ -41,15 +41,15 @@ type ResultArgs struct {
 	WafBlock    bool
 }
 
-// Recorder accumulates per-model counters, mirroring src/models/stats.mjs.
+// Recorder tracks per-model counters. Mirrors src/models/stats.mjs.
 type Recorder struct {
 	mu             sync.Mutex
 	stats          map[string]*ModelStats
 	slowResponseMs int
 }
 
-// NewRecorder returns a recorder that classifies responses slower than
-// slowResponseMs as slow (SLOW_RESPONSE_MS).
+// NewRecorder creates a recorder. Responses slower than slowResponseMs
+// count as slow (SLOW_RESPONSE_MS).
 func NewRecorder(slowResponseMs int) *Recorder {
 	return &Recorder{
 		stats:          make(map[string]*ModelStats),
@@ -57,8 +57,8 @@ func NewRecorder(slowResponseMs int) *Recorder {
 	}
 }
 
-// Start records the beginning of a request for a model: requests++ and
-// lastSeen = now (RFC3339).
+// Start records that a request started. Increments requests and sets
+// lastSeen to now (RFC3339).
 func (r *Recorder) Start(modelID string) {
 	id := orUnknown(modelID)
 	r.mu.Lock()
@@ -68,16 +68,16 @@ func (r *Recorder) Start(modelID string) {
 	s.LastSeen = time.Now().UTC().Format(time.RFC3339)
 }
 
-// Result records the outcome of a request, applying the same counter rules as
-// recordModelResult:
+// Result records one request outcome, same rules as recordModelResult:
 //
-//   - 2xx && no error      → successes++
-//   - error || >=400 || emptyOutput → failures++
-//   - emptyOutput → emptyOutputs++; wafBlock → wafBlocks++
-//   - 429 → rateLimits++; >=500 → upstreamErrors++
-//   - durationMs >= slowResponseMs → slowResponses++
+//   2xx and no error counts as success
+//   error, >=400 or emptyOutput counts as failure
+//   emptyOutput increments emptyOutputs, wafBlock increments wafBlocks
+//   429 increments rateLimits, >=500 increments upstreamErrors
+//   durationMs >= slowResponseMs increments slowResponses
 //
-// totalMs/maxMs/totalChunks accumulate; lastStatus/lastError/lastSeen update.
+// totalMs, maxMs and totalChunks are accumulated, lastStatus and lastError
+// are updated.
 func (r *Recorder) Result(modelID string, args ResultArgs) {
 	id := orUnknown(modelID)
 	r.mu.Lock()
@@ -119,9 +119,9 @@ func (r *Recorder) Result(modelID string, args ResultArgs) {
 	}
 }
 
-// Snapshot returns copies of all model stats with AvgMs/AvgChunks derived
-// (rounded half-up, matching Math.round), sorted by lastSeen descending —
-// models that were never seen (empty lastSeen) sort last.
+// Snapshot returns a copy of all stats with AvgMs and AvgChunks derived
+// (rounded half up, like Math.round). Sorted by lastSeen descending, unseen
+// models (empty lastSeen) sort last.
 func (r *Recorder) Snapshot() []ModelStats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -156,7 +156,7 @@ func (r *Recorder) get(modelID string) *ModelStats {
 	return s
 }
 
-// roundDiv divides total by count, rounding half up (Math.round semantics).
+// roundDiv divides total by count, rounding half up like Math.round.
 func roundDiv(total int64, count int) int64 {
 	if count <= 0 {
 		return 0
@@ -164,7 +164,7 @@ func roundDiv(total int64, count int) int64 {
 	return (total + int64(count)/2) / int64(count)
 }
 
-// orUnknown maps an empty model id to "unknown", like the Node `|| "unknown"`.
+// orUnknown returns "unknown" for an empty model ID, like Node || "unknown".
 func orUnknown(modelID string) string {
 	if modelID == "" {
 		return "unknown"

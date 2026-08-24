@@ -1,4 +1,4 @@
-# AgentRouter Spoof Proxy — AI Agent Setup Guide
+# AgentRouter Spoof Proxy: AI Agent Setup Guide
 
 Quick setup for AI coding agents (opencode, Claude Code, Cursor).
 
@@ -50,7 +50,7 @@ Expected: `{"ok":true,"upstream":"agentrouter.org:443","modelSource":"static","s
 2. Name: `AgentRouter`, Prefix: `AG`, Type: `chat completions`
 3. Base URL: `http://localhost:8318/v1`
 4. **Import from /models**
-5. Add API Key (AgentRouter key — stored in 9Router only)
+5. Add API Key (AgentRouter key, stored in 9Router only)
 
 > Windows Docker Desktop: use `http://host.docker.internal:8318/v1`
 
@@ -103,8 +103,8 @@ make cross                # cross-compile matrix → dist/
 | Problem | Fix |
 |---------|-----|
 | `wafCookie: false` | Wait 5s, warmup in progress |
-| Model keeps getting 500 | **Auto model health** removes it from list → 9Router falls back |
+| Model keeps getting 500 | **Auto model health** removes it from list, 9Router falls back |
 | Docker: 9Router can't reach proxy | `docker network connect 9router-net agentrouter-proxy` |
 | Windows: 9Router can't reach proxy | Use `host.docker.internal` in Base URL |
-| SSE streams cut mid-answer | Check logs for `SLOW STREAM`/`IDLE TIMEOUT`; raise `SSE_CHUNK_TIMEOUT_MS`/`SSE_IDLE_TIMEOUT_MS` |
-| Installer falls back to source build | No GitHub release published yet — publish one, or install Go 1.26+ |
+| SSE streams cut mid-answer | Check logs for `SLOW STREAM`/`IDLE TIMEOUT`, raise `SSE_CHUNK_TIMEOUT_MS`/`SSE_IDLE_TIMEOUT_MS` |
+| Installer falls back to source build | No GitHub release published yet. Publish one, or install Go 1.26+ |

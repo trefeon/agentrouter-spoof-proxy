@@ -1,14 +1,12 @@
-// Package auth provides the request-header spoofing and WAF cookie handling
-// that make the upstream (agentrouter.org) treat this proxy as a first-party
-// Claude Code client.
+// Package auth spoofs request headers and manages WAF cookies so the upstream
+// (agentrouter.org) sees this proxy as a first-party Claude Code client.
 //
-// Port of src/auth/spoof.mjs and src/auth/waf.mjs; behavior is the spec.
+// Port of src/auth/spoof.mjs and src/auth/waf.mjs. Behavior is the spec.
 package auth
 
-// AnthropicHeaders returns a fresh copy of the Anthropic-* spoof headers
+// AnthropicHeaders returns a fresh copy of the Anthropic spoof headers
 // (src/auth/spoof.mjs ANTHROPIC_SPOOF_HEADERS, byte-identical values).
-// Callers get their own map on every call so they can never mutate the
-// shared values.
+// A new map each call, so callers cannot mutate shared state.
 func AnthropicHeaders() map[string]string {
 	return map[string]string{
 		"Anthropic-Version":                         "2023-06-01",
@@ -17,8 +15,8 @@ func AnthropicHeaders() map[string]string {
 	}
 }
 
-// GenericHeaders returns a fresh copy of the claude-cli client fingerprint
-// headers (src/auth/spoof.mjs GENERIC_SPOOF_HEADERS, byte-identical values).
+// GenericHeaders returns a fresh copy of the claude-cli fingerprint headers
+// (src/auth/spoof.mjs GENERIC_SPOOF_HEADERS, byte-identical values).
 func GenericHeaders() map[string]string {
 	return map[string]string{
 		"User-Agent":                  "claude-cli/2.1.92 (external, sdk-cli)",
@@ -35,8 +33,8 @@ func GenericHeaders() map[string]string {
 	}
 }
 
-// SpoofHeaders returns the merged spoof header set: generic first, Anthropic
-// wins on any overlap (src/auth/spoof.mjs SPOOF_HEADERS).
+// SpoofHeaders merges both sets. Generic first, Anthropic wins on overlap
+// (src/auth/spoof.mjs SPOOF_HEADERS).
 func SpoofHeaders() map[string]string {
 	m := GenericHeaders()
 	for k, v := range AnthropicHeaders() {

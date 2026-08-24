@@ -52,7 +52,7 @@ func TestThinkStripperSingleChunkSpan(t *testing.T) {
 }
 
 func TestThinkStripperSplitOpenTag(t *testing.T) {
-	// "<thi" | "nk>SECRET response..." — tag split across TCP chunks.
+	// "<thi" plus "nk>SECRET response...", tag split across TCP chunks.
 	if got := run(t, "a<thi", "nk>SECRET response</think>tail"); got != "atail" {
 		t.Errorf("got %q, want %q", got, "atail")
 	}
@@ -63,7 +63,7 @@ func TestThinkStripperSplitOpenTag(t *testing.T) {
 }
 
 func TestThinkStripperSplitCloseTag(t *testing.T) {
-	// "<think>abc</th" | "ink>rest" — close tag split across chunks.
+	// "<think>abc</th" plus "ink>rest", close tag split across chunks.
 	s := NewThinkStripper()
 	if got := string(s.Process([]byte("x<think>abc</th"))); got != "x" {
 		t.Errorf("first chunk forward = %q, want %q", got, "x")
@@ -77,7 +77,7 @@ func TestThinkStripperSplitCloseTag(t *testing.T) {
 }
 
 func TestThinkStripperMultiByteUTF8(t *testing.T) {
-	// Single chunk: CJK around a span — bytes must pass through untouched.
+	// Single chunk: CJK around a span, bytes must pass through untouched.
 	if got := run(t, "你好<think>x</think>世界"); got != "你好世界" {
 		t.Errorf("got %q, want %q", got, "你好世界")
 	}

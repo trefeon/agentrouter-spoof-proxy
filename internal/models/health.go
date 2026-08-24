@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// Health timing constants, mirroring src/models/health.mjs.
+// Health timing mirrors src/models/health.mjs.
 const (
 	probeTimeout  = 8 * time.Second   // per-probe deadline
 	exhaustLockMs = 120 * time.Second // 429 rate-limit lock
@@ -28,16 +28,16 @@ var (
 	backoff = []time.Duration{30 * time.Second, 60 * time.Second, 120 * time.Second, 300 * time.Second, 600 * time.Second}
 )
 
-// Health tracks per-model failure locks, ported from src/models/health.mjs.
-// failedUntil holds unix-millisecond expiry timestamps; failCounts holds the
-// consecutive-failure count that drives the BACKOFF ladder.
+// Health tracks per-model failure locks. Ported from src/models/health.mjs.
+// failedUntil holds expiry timestamps in unix millis, failCounts tracks
+// consecutive failures that drive the BACKOFF ladder.
 type Health struct {
 	mu          sync.Mutex
 	failedUntil map[string]int64
 	failCounts  map[string]int
 }
 
-// NewHealth returns an empty health tracker (all models healthy).
+// NewHealth returns an empty tracker, all models healthy.
 func NewHealth() *Health {
 	return &Health{
 		failedUntil: make(map[string]int64),
@@ -45,7 +45,7 @@ func NewHealth() *Health {
 	}
 }
 
-// IsHealthy reports whether the model has no lock or its lock has expired.
+// IsHealthy reports whether the model is not locked or its lock expired.
 func (h *Health) IsHealthy(modelID string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -56,7 +56,7 @@ func (h *Health) IsHealthy(modelID string) bool {
 	return time.Now().UnixMilli() > until
 }
 
-// HealthyModels filters the given models down to the currently healthy ones.
+// HealthyModels returns only the currently healthy models.
 func (h *Health) HealthyModels(models []Model) []Model {
 	var out []Model
 	for _, m := range models {
@@ -67,9 +67,9 @@ func (h *Health) HealthyModels(models []Model) []Model {
 	return out
 }
 
-// MarkFailed locks a model after a 5xx failure (4xx never locks, mirroring the
-// Node `statusCode >= 500` guard). Each consecutive failure walks up the
-// BACKOFF ladder; the cooldown caps at the last rung (600s).
+// MarkFailed locks a model after a 5xx. 4xx never locks, mirrors Node
+// statusCode >= 500. Each consecutive failure steps up the BACKOFF ladder,
+// capped at 600s.
 func (h *Health) MarkFailed(modelID string, statusCode int) {
 	if modelID == "" || statusCode < 500 {
 		return
@@ -80,11 +80,11 @@ func (h *Health) MarkFailed(modelID string, statusCode int) {
 	cooldown := backoff[ladderIndex(count)]
 	h.failedUntil[modelID] = time.Now().UnixMilli() + cooldown.Milliseconds()
 	h.mu.Unlock()
-	slog.Info(fmt.Sprintf("MODEL UNHEALTHY: %s (%d, #%d) — locked for %ds", modelID, statusCode, count, int(cooldown.Seconds())))
+	slog.Info(fmt.Sprintf("MODEL UNHEALTHY: %s (%d, #%d), locked for %ds", modelID, statusCode, count, int(cooldown.Seconds())))
 }
 
-// MarkExhausted locks a rate-limited model for 120s (429, src/health.mjs
-// markModelExhausted). The failure count is left untouched.
+// MarkExhausted locks a 429 rate-limited model for 120s. Failure count
+// is not changed (src/health.mjs markModelExhausted).
 func (h *Health) MarkExhausted(modelID string) {
 	if modelID == "" {
 		return
@@ -92,10 +92,10 @@ func (h *Health) MarkExhausted(modelID string) {
 	h.mu.Lock()
 	h.failedUntil[modelID] = time.Now().UnixMilli() + exhaustLockMs.Milliseconds()
 	h.mu.Unlock()
-	slog.Info(fmt.Sprintf("MODEL EXHAUSTED (429): %s — locked for %ds", modelID, int(exhaustLockMs.Seconds())))
+	slog.Info(fmt.Sprintf("MODEL EXHAUSTED (429): %s, locked for %ds", modelID, int(exhaustLockMs.Seconds())))
 }
 
-// MarkDegraded locks a degraded model (slow/empty/sse-timeout) for 60s.
+// MarkDegraded locks a slow, empty or SSE-timeout model for 60s.
 func (h *Health) MarkDegraded(modelID, reason string) {
 	if modelID == "" {
 		return
@@ -106,16 +106,13 @@ func (h *Health) MarkDegraded(modelID, reason string) {
 	h.mu.Lock()
 	h.failedUntil[modelID] = time.Now().UnixMilli() + degradeLockMs.Milliseconds()
 	h.mu.Unlock()
-	slog.Info(fmt.Sprintf("MODEL DEGRADED: %s (%s) — locked for %ds", modelID, reason, int(degradeLockMs.Seconds())))
+	slog.Info(fmt.Sprintf("MODEL DEGRADED: %s (%s), locked for %ds", modelID, reason, int(degradeLockMs.Seconds())))
 }
 
-// ProbeLoop runs the recovery-probe goroutine until ctx is canceled: every
-// probeInterval it probes each model whose lock has expired with a POST
-// /v1/messages (8s timeout, spoof headers + current WAF cookie). A 200 clears
-// the lock; anything else extends it with the next BACKOFF step.
-//
-// The loop is driven entirely by ctx — cancel it to stop (no separate Stop
-// method, mirroring the plan's "keep simple" note).
+// ProbeLoop runs recovery probes until ctx is canceled. Every
+// probeInterval it probes expired locks with POST /v1/messages (8s timeout,
+// spoof headers and current WAF cookie). 200 clears the lock, anything else
+// extends it. Cancel ctx to stop, there is no separate Stop method.
 func (h *Health) ProbeLoop(ctx context.Context, client *http.Client, host string, port int, getHeaders func() map[string]string, getCookie func() string) {
 	ticker := time.NewTicker(probeInterval)
 	defer ticker.Stop()
@@ -129,7 +126,7 @@ func (h *Health) ProbeLoop(ctx context.Context, client *http.Client, host string
 	}
 }
 
-// probeOnce snapshots the expired locks and probes each one.
+// probeOnce finds expired locks and probes each one.
 func (h *Health) probeOnce(ctx context.Context, client *http.Client, host string, port int, getHeaders func() map[string]string, getCookie func() string) {
 	h.mu.Lock()
 	if len(h.failedUntil) == 0 {
@@ -170,9 +167,8 @@ func (h *Health) clearLock(modelID string) {
 	slog.Info("MODEL RECOVERED: " + modelID)
 }
 
-// extendLock extends a still-failing model's lock using the next BACKOFF step
-// (the probe-loop path from src/models/health.mjs — distinct from MarkFailed,
-// which is only called on live request failures).
+// extendLock extends a still-failing lock with the next BACKOFF step.
+// This is the probe path, separate from MarkFailed which is for live failures.
 func (h *Health) extendLock(modelID string) {
 	h.mu.Lock()
 	count := h.failCounts[modelID] + 1
@@ -180,10 +176,10 @@ func (h *Health) extendLock(modelID string) {
 	cooldown := backoff[ladderIndex(count)]
 	h.failedUntil[modelID] = time.Now().UnixMilli() + cooldown.Milliseconds()
 	h.mu.Unlock()
-	slog.Warn(fmt.Sprintf("MODEL STILL DOWN: %s (#%d) — extended for %ds", modelID, count, int(cooldown.Seconds())))
+	slog.Warn(fmt.Sprintf("MODEL STILL DOWN: %s (#%d), extended for %ds", modelID, count, int(cooldown.Seconds())))
 }
 
-// ladderIndex clamps a 1-based failure count to the BACKOFF ladder.
+// ladderIndex clamps a 1-based count to the BACKOFF ladder.
 func ladderIndex(count int) int {
 	if count-1 >= len(backoff) {
 		return len(backoff) - 1
@@ -191,10 +187,9 @@ func ladderIndex(count int) int {
 	return count - 1
 }
 
-// probeModel sends one recovery probe: POST /v1/messages with a minimal
-// Anthropic payload, spoof headers and the current WAF cookie. Returns true
-// only on HTTP 200. A fresh client (8s timeout) sharing the caller's
-// Transport is used per probe.
+// probeModel sends one recovery probe with POST /v1/messages, minimal
+// payload, spoof headers and WAF cookie. Returns true only on 200. Uses
+// a fresh 8s client that shares the caller's Transport.
 func probeModel(ctx context.Context, client *http.Client, host string, port int, modelID, cookie string, headers map[string]string) bool {
 	body, err := json.Marshal(map[string]any{
 		"model":      modelID,

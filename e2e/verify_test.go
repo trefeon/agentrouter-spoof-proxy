@@ -1,4 +1,4 @@
-// Package e2e — issue-verification regression tests (port of
+// Package e2e, issue-verification regression tests (port of
 // tests/verify-issues.test.mjs, 7 tests). These lock in historical bug fixes;
 // the naming and intent follow the Node suite. Two tests inspect
 // cmd/proxy/main.go source (the original inspected proxy.mjs source); the

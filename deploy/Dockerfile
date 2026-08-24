@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
-# Go image: multi-stage, native cross-compile via TARGETOS/TARGETARCH (no QEMU
-# emulation), ~15-25MB final image. HEALTHCHECK uses the binary's -healthcheck
-# flag mode (distroless has no shell/wget).
+# Go build, multi-stage with native cross-compile via TARGETOS and TARGETARCH
+# (no QEMU). Final image is 15 to 25 MB. HEALTHCHECK uses binary -healthcheck
+# flag because distroless has no shell or wget.
 FROM --platform=$BUILDPLATFORM golang:1.26 AS build
 ARG TARGETOS TARGETARCH
 WORKDIR /src

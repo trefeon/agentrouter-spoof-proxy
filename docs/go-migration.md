@@ -1,18 +1,15 @@
-# Go Migration Plan — agentrouter-spoof-proxy
+# Go Migration Plan: agentrouter-spoof-proxy
 
-> **STATUS: EXECUTED ✅** — This migration is complete (commit `3418ea1`, Aug 2026).
+> **STATUS: EXECUTED ✅**, This migration is complete (commit `3418ea1`, Aug 2026).
 > The Node.js codebase was removed in commit `4a76d62`; the repository is now
 > 100% Go. This document is retained as the historical port map / behavioral
 > contract reference. See `README.md` and `AGENTS.md` for the current facts.
 
-Full rewrite of the Node.js proxy in **Go**. Goal: a *fast* cross-platform proxy —
-small binary, tiny Docker image, long-lived SSE streaming without framework
+Full rewrite of the Node.js proxy in **Go**. Goal is a fast cross-platform proxy: small binary, tiny Docker image, long-lived SSE streaming without framework
 overhead. Current code: zero-dep Node ESM, 13 modules + thin entry, 194 tests
 (132 unit + 55 E2E + 7 issue-verification).
 
-This document is the port map. **Behavior is the spec** — the existing test
-suite is ported first and kept green as the regression gate. We are porting
-semantics, not code.
+This doc is the port map. **Behavior is the spec**. The existing test suite is ported first and kept green as the regression gate. We port semantics, not code.
 
 ---
 
@@ -32,8 +29,8 @@ semantics, not code.
 | Process mgmt | systemd (bare metal) / `restart: unless-stopped` (Docker) | PM2 is Node-only and goes away |
 | Cross-compile | `GOOS/GOARCH` env vars | pure Go; trivial from Windows |
 
-**Deliberately excluded**: fasthttp, Hono/Fastify-class frameworks, Bun, gRPC,
-koanf (overkill for env-only), zerolog (slog is fine at proxy scale — the
+**Deliberately excluded:** fasthttp, Hono/Fastify-class frameworks, Bun, gRPC,
+koanf (overkill for env-only), zerolog (slog is fine at proxy scale, the
 slog↔zerolog bridge kills zerolog's perf advantage, don't mix).
 
 ---
@@ -75,7 +72,7 @@ agentrouter-spoof-proxy/
 
 ## 3. Module-by-module port map
 
-### 3.1 Entry & server — `proxy.mjs` → `cmd/proxy/main.go`
+### 3.1 Entry & server: `proxy.mjs` → `cmd/proxy/main.go`
 
 | Node behavior | Go equivalent |
 |---|---|
@@ -103,13 +100,12 @@ anything else                 → 404; wrong method → 405; auth fail → 401
 ```
 
 ServeMux note: Go 1.26 changed trailing-slash redirects 301→307. We register
-exact paths only (no sub-routes), so this is irrelevant — but the ported E2E
+exact paths only (no sub-routes), so it does not matter, but the ported E2E
 tests must not assume redirect behavior.
 
-### 3.2 Config — `src/config.mjs` → `internal/config/config.go`
+### 3.2 Config: `src/config.mjs` → `internal/config/config.go`
 
-`caarlos0/env` struct with **identical env names** so `.env` and
-`docker-compose.yml` work unchanged. All 25 vars (see §6 parity table).
+`caarlos0/env` struct uses **identical env names** so `.env` and `docker-compose.yml` work unchanged. All 25 vars (see §5 parity table).
 `Validate()` ported check-for-check from the 16-entry validation table (port
 range, positive ints, `"true"/"false"` booleans, `http|https` protocol,
 non-empty listen address).
@@ -119,30 +115,30 @@ Upstream pool (Node `Agent{keepAlive, maxSockets:64, maxFreeSockets:16, lifo}`)
 IdleConnTimeout: 90s, ForceAttemptHTTP2: false}`. TLS `rejectUnauthorized: true`
 is Go's default.
 
-### 3.3 Pure helpers — `src/utils.mjs` → `internal/proxy/*.go`
+### 3.3 Pure helpers: `src/utils.mjs` → `internal/proxy/*.go`
 
-Direct 1:1 ports, all pure and unit-tested:
+Straight 1:1 ports, all pure and unit-tested:
 
-- `eom.go` — `eomTail`, `sseErrorFrame`, `abnormalFinish` (exact strings, both
+- `eom.go`: `eomTail`, `sseErrorFrame`, `abnormalFinish` (exact strings, both
   formats). Keep as byte constants, not templates.
-- `headers.go` — `HOP_BY_HOP` set, `filterHeaders` (Go: build `http.Header`),
+- `headers.go`: `HOP_BY_HOP` set, `filterHeaders` (Go: build `http.Header`),
   `normalizeSetCookie` (Go `Add` handles multi Set-Cookie natively),
   `rewritePath` (`/messages` → `/v1/messages`), `redactSensitive` (regex
   `sk[-_][A-Za-z0-9_-]+`).
-- `retry.go` — `isRetryable(status, msg, retryOn5xx)` (transport-error keywords:
+- `retry.go`: `isRetryable(status, msg, retryOn5xx)` (transport-error keywords:
   socket hang up / timeout / ECONNRESET / ETIMEDOUT / ENETUNREACH),
   `getRetryDelay(attempt, base) = base << attempt`, `getResponseTimeout(bodyBytes)`.
-- `body.go` — `injectPrompt` (both `/v1/messages` system rewrite and
+- `body.go`: `injectPrompt` (both `/v1/messages` system rewrite and
   `/v1/chat/completions` messages.unshift), `summarizeRequest` (model/stream/
   max_tokens/messageCount), `responseHasEmptyOutput` (Anthropic content array /
   OpenAI choices[0].message.content).
-- `wafmarkers.go` — `isWafBlock` (403/405 body markers: alicdn, block_message,
+- `wafmarkers.go`: `isWafBlock` (403/405 body markers: alicdn, block_message,
   renderData, waf.js).
-- `safetoken.go` — `safeTokenEqual`: length check + `crypto/subtle.ConstantTimeCompare`.
+- `safetoken.go`: `safeTokenEqual`: length check + `crypto/subtle.ConstantTimeCompare`.
 
 `MAX_BODY_SIZE = 20MB`, `SSE_EOM`, `SSE_DONE` → package constants.
 
-### 3.4 Errors + status — `src/errors.mjs` + `src/status-code.mjs` → `internal/proxy/errors.go`
+### 3.4 Errors + status: `src/errors.mjs` + `src/status-code.mjs` → `internal/proxy/errors.go`
 
 ```go
 var ErrTimeout = errors.New("EUPSTREAM_TIMEOUT") // → 504
@@ -154,50 +150,46 @@ var ErrTimeout = errors.New("EUPSTREAM_TIMEOUT") // → 504
 `{error: {code, message, type: "proxy_error"}}` JSON shape byte-compatible with
 9Router.
 
-### 3.5 Spoof headers — `src/auth/spoof.mjs` → `internal/auth/spoof.go`
+### 3.5 Spoof headers: `src/auth/spoof.mjs` → `internal/auth/spoof.go`
 
-Three exported maps, byte-identical values: `AnthropicSpoofHeaders`,
-`GenericSpoofHeaders`, `SpoofHeaders` (merged). Go canonicalizes header names on
-write (`Anthropic-Version` stays `Anthropic-Version`) — no lowercase-overwrite
-hazard the Node code had to defend against, but keep the same
-client-supplied-`anthropic-version`-ignored rule anyway (defense in depth).
+Three exported maps with byte-identical values: `AnthropicSpoofHeaders`,
+`GenericSpoofHeaders`, `SpoofHeaders` (merged). Go canonicalizes header names on write (`Anthropic-Version` stays `Anthropic-Version`), so the lowercase overwrite hazard in Node is gone. We still keep the same rule that ignores a client-supplied `anthropic-version` (defense in depth).
 
-### 3.6 WAF cookies — `src/auth/waf.mjs` → `internal/auth/waf.go`
+### 3.6 WAF cookies: `src/auth/waf.mjs` → `internal/auth/waf.go`
 
-Shared state becomes a **thread-safe store**:
+Shared state is a **thread-safe store**:
 
 ```go
 type Store struct { mu sync.RWMutex; cookies []string }
 ```
 
-- `extractWafCookies` — same name allowlist (`acw_tc`, `acw_sc__v2/3`,
-  `cdn_sec_tc`), skip empty values (empty cookie = failed challenge, worse than
-  none). Go: `resp.Cookies()` + `Cookie.Valid()`.
-- `mergeWafCookies` — keyed by cookie name, fresh wins, preserves unrelated
+- `extractWafCookies`: same name allowlist (`acw_tc`, `acw_sc__v2/3`,
+  `cdn_sec_tc`), skip empty values (empty cookie means failed challenge, worse than none). Go: `resp.Cookies()` + `Cookie.Valid()`.
+- `mergeWafCookies`: keyed by cookie name, fresh wins, preserves unrelated
   names (pure, unit-tested).
-- `captureWafCookies` — called on every upstream response (rotated cookies
+- `captureWafCookies`: called on every upstream response (rotated cookies
   picked up immediately, not only on warmup).
-- `warmup` — goroutine: GET `/` with the browser header set, `agent: false`
+- `warmup`: goroutine: GET `/` with the browser header set, `agent: false`
   equivalent = a **fresh** `http.Client{Timeout: 10s}` (no shared pool), 3
   attempts with 1s/2s backoff, merge-don't-replace. Returns early on success.
 
-### 3.7 Models — discovery / health / stats → `internal/models/*.go`
+### 3.7 Models: discovery / health / stats → `internal/models/*.go`
 
-- `discovery.go` — static CSV list + optional dynamic fetch (GET /v1/models with
+- `discovery.go`: static CSV list + optional dynamic fetch (GET /v1/models with
   `AR_API_KEY`), 15s timeout, fall back to static on any error. `modelSource`
   guarded by mutex.
-- `health.go` — `failedUntil` + `failCounts` maps → `sync.RWMutex`-guarded.
+- `health.go`: `failedUntil` + `failCounts` maps → `sync.RWMutex`-guarded.
   `markModelFailed` (5xx, BACKOFF ladder 30s/1m/2m/5m/10m), `markModelExhausted`
   (429, 120s), `markModelDegraded` (60s), recovery probe goroutine (60s ticker,
   8s probe timeout, probe = POST /v1/messages `max_tokens:1` with spoof headers
   + WAF cookie).
-- `stats.go` — per-model stats map (requests/successes/failures/emptyOutputs/
+- `stats.go`: per-model stats map (requests/successes/failures/emptyOutputs/
   slowResponses/wafBlocks/rateLimits/upstreamErrors/totalMs/maxMs/totalChunks/
   lastStatus/lastError/lastSeen) + `avgMs`/`avgChunks` derivation + sort by
   lastSeen desc. Mutex-guarded; `recordModelStart`/`recordModelResult` called
   from the handler.
 
-### 3.8 Circuit breaker — `src/resilience/circuit-breaker.mjs` → `internal/resilience/breaker.go`
+### 3.8 Circuit breaker: `src/resilience/circuit-breaker.mjs` → `internal/resilience/breaker.go`
 
 Atomics, not mutexes:
 
@@ -211,7 +203,7 @@ Open after 5 consecutive final 5xx/transport failures; cooldown
 accounting rules preserved (429 never opens the circuit, 4xx neither fails nor
 resets).
 
-### 3.9 Request handler — `src/proxy/handler.mjs` → `internal/proxy/handler.go`
+### 3.9 Request handler: `src/proxy/handler.mjs` → `internal/proxy/handler.go`
 
 The critical port. The Node state machine's invariant flags map to Go
 primitives:
@@ -219,9 +211,9 @@ primitives:
 | Node invariant | Go equivalent |
 |---|---|
 | `proxyDone` (finishProxy once) | `sync.Once` / `atomic.Bool` + ctx; active-stream `WaitGroup.Done` once |
-| `errorHandled` per attempt | **disappears** — Go's sequential retry loop returns one error per attempt; no multiple-listener double-fire possible |
-| `upstreamResponded` disarms adaptive timeout | `context.WithCancel` + `time.AfterFunc(adaptive)` → `cancel()` on headers arrival (mirrors `responseTimer`) |
-| `req.on("close")` → destroy upstream | `r.Context().Done()` → cancel upstream request (server cancels ctx on client disconnect) |
+| `errorHandled` per attempt | **disappears**, Go's sequential retry loop returns one error per attempt; no multiple-listener double-fire possible |
+| `upstreamResponded` disarms adaptive timeout | `context.WithCancel` + `time.AfterFunc(adaptive)` to `cancel()` on headers arrival (mirrors `responseTimer`) |
+| `req.on("close")` to destroy upstream | `r.Context().Done()` to cancel upstream request (server cancels ctx on client disconnect) |
 | `req.on("error")` | HTTP/2/1 read error on `r.Body` |
 
 Flow, ported step for step:
@@ -239,7 +231,7 @@ Flow, ported step for step:
 
 ```
 for attempt := 0; ; attempt++ {
-    resp, err := doUpstream(ctx, ...)   // one call, one error — no listener races
+    resp, err := doUpstream(ctx, ...)   // one call, one error, no listener races
     if err → if retryable && attempt < MAX_RETRIES → backoff, continue
             else → recordFailure, markModelFailed, respond (504 timeout / 502)
     // WAF 403/405 on attempt 0 → warmup(), refresh cookie, retry once
@@ -260,30 +252,28 @@ for attempt := 0; ; attempt++ {
 filtered first (strip hop-by-hop), `set-cookie` kept as array, then
 `w.WriteHeader(status)` + streaming body with flush (see §3.10).
 
-### 3.10 SSE pump — `src/proxy/stream.mjs` → `internal/proxy/sse.go`
+### 3.10 SSE pump: `src/proxy/stream.mjs` → `internal/proxy/sse.go`
 
-Port of `pipeSse` as a function `pumpSse(ctx, w, upstreamResp, opts) -> Result`.
+Port of `pipeSse` as `pumpSse(ctx, w, upstreamResp, opts) -> Result`.
 Structure:
 
 - **Read loop** (one goroutine): `bufio.Reader` on upstream body → for each
   chunk: run `thinkstrip` + `openaiPending` frame filter → `w.Write(chunk)` →
   `http.NewResponseController(w).Flush()` → re-arm chunk/idle timers.
   **Backpressure is automatic**: `w.Write` blocks when the client's buffer is
-  full, which stalls the upstream read — the Node pause/resume dance is
+  full, which stalls the upstream read, the Node pause/resume dance is
   unnecessary.
-- **Keepalive** (goroutine + `time.Ticker`, 10s): write `:\n\n` while
-  stream-alive; skip on backpressure.
-- **Idle watchdog** (`SSE_IDLE_TIMEOUT_MS`, default 10m): `time.AfterFunc` —
-  terminates a genuinely silent stream → error frame + abnormal-finish EOM +
-  destroy upstream. `time.After` in a `select` is the idiomatic equivalent.
+- **Keepalive** (goroutine + `time.Ticker`, 10s): write `:\n\n` while stream is alive, skip on backpressure.
+- **Idle watchdog** (`SSE_IDLE_TIMEOUT_MS`, default 10m): `time.AfterFunc` 
+  terminates a genuinely silent stream to error frame + abnormal-finish EOM + destroy upstream. `time.After` in a `select` is the idiomatic equivalent.
 - **Chunk stall watchdog** (`SSE_CHUNK_TIMEOUT_MS`, default 30s): re-arms on
   every chunk; if it fires while the connection is alive → log SLOW STREAM,
   keep alive, re-arm (never cut a live stream); if dead → terminate.
 - **`isStreamAlive`** → `ctx.Err() == nil && !wClosed && upstream body alive`
   (client ctx + `ResponseController` status).
-- **Format-aware EOM**: `eom.go` strings — inject on abnormal end only if
+- **Format-aware EOM**: `eom.go` strings, inject on abnormal end only if
   `!sawMessageStop`; error frame first, then `abnormalFinish`.
-- **Terminal detection**: `sseparse.go` carry-over frame classifier detects
+- **Terminal detection**: `sseparse.go` frame classifier detects
   `event: message_stop` / `data: [DONE]` across chunk boundaries; comment-only
   (`:`) and `event: ping` lines are noise, not data (`sawDataEvent` semantics).
 - **Callbacks** → a `Result` struct returned on finish + `onDegrade` /
@@ -293,10 +283,10 @@ Structure:
   502; `upstream_closed` → 502; clean end → flush pending buffers, check
   `empty_sse` degrade, 200 with `emptyOutput` flag).
 
-**WriteTimeout is the #1 SSE killer** — never set `http.Server.WriteTimeout`.
+**WriteTimeout is the #1 SSE killer**, never set `http.Server.WriteTimeout`.
 Set only `ReadHeaderTimeout` + `IdleTimeout`.
 
-### 3.11 `thinkstrip.go` — byte-level `<think>` stripping (pure, new module)
+### 3.11 `thinkstrip.go`: byte-level `<think>` stripping (pure, new module)
 
 `stream.mjs` lines 251–300 port verbatim as a pure `[]byte` function with
 explicit state (`insideThinkTag`, `thinkBuf`, `tagPrefixPending`), so it can be
@@ -312,7 +302,7 @@ upstream-end-mid-span → 502 path.
 | Current | Go port | Notes |
 |---|---|---|
 | `tests/unit/utils.test.mjs` (320) | `internal/proxy/{eom,headers,retry,body,thinkstrip,sseparse}_test.go` | table-driven; pure functions |
-| `tests/unit/stream.test.mjs` (420) | `internal/proxy/sse_test.go` | **`testing/synctest` (Go 1.25+)** replaces real-sleep waits — deterministic fake clocks for keepalive/idle/stall timers; real `net.Pipe`/`httptest` for socket-level framing |
+| `tests/unit/stream.test.mjs` (420) | `internal/proxy/sse_test.go` | **`testing/synctest` (Go 1.25+)** replaces real-sleep waits, deterministic fake clocks for keepalive/idle/stall timers; real `net.Pipe`/`httptest` for socket-level framing |
 | `tests/unit/errors.test.mjs` (28) | `internal/proxy/errors_test.go` | sentinel errors + status mapping |
 | `tests/unit/resilience.test.mjs` (65) | `internal/resilience/breaker_test.go` | atomic state, cooldown ladder |
 | `tests/unit/models.test.mjs` (98) | `internal/models/*_test.go` | health/stats/discovery |
@@ -329,7 +319,7 @@ convenience, never mock/suite.
 
 ## 5. Config parity table (env names unchanged)
 
-All names/defaults identical to `.env.example` — docker-compose and install
+All names/defaults identical to `.env.example`, docker-compose and install
 scripts keep working. `caarlos0/env` handles `parseInt`/`"true"` typing;
 `Validate()` reproduces the 16 checks.
 
@@ -382,12 +372,12 @@ ENTRYPOINT ["/proxy"]
 ```
 
 Build from Windows: `docker buildx build --platform linux/amd64,linux/arm64
---push .` (native cross-compile via TARGETOS/TARGETARCH — no QEMU emulation).
+--push .` (native cross-compile via TARGETOS/TARGETARCH, no QEMU emulation).
 Image lands at **~15–25MB** vs the current 120MB.
 
 **Healthcheck**: distroless has no shell/`wget`. Add a `-healthcheck` flag mode
 to the binary (GET /health, exit 0/1) used by
-`HEALTHCHECK CMD ["/proxy", "-healthcheck"]` — zero extra files in the image.
+`HEALTHCHECK CMD ["/proxy", "-healthcheck"]`, zero extra files in the image.
 
 ### Process management
 
@@ -438,9 +428,9 @@ Each phase ends green: `go test ./...` + `golangci-lint run` + (phase 3+)
 | **Concurrency bugs** (Node is single-threaded; Go is not) | Mutex/atomic discipline listed per module (§3); race detector on in tests: `go test -race` |
 | **`http.Server.WriteTimeout` silently kills SSE** | Never set it; use `ReadHeaderTimeout` + `IdleTimeout` (Tyk's SSE tests as reference) |
 | ResponseWriter wrapper breaking streaming | We don't wrap; if middleware added, must implement `Unwrap()` (go#64045) |
-| `httputil.ReverseProxy` limitations | Not used — manual copy-with-flush because of custom pumps; ReverseProxy only as a future passthrough baseline |
+| `httputil.ReverseProxy` limitations | Not used, manual copy-with-flush because of custom pumps; ReverseProxy only as a future passthrough baseline |
 | ServeMux 301→307 trailing-slash change (Go 1.26) | Exact-path routes only; E2E tests must not assume redirects |
-| `http.Client.Timeout` covers body reads — would kill SSE | Don't set Client.Timeout; use context deadline for headers + pump's own idle/chunk timers for body |
+| `http.Client.Timeout` covers body reads, would kill SSE | Don't set Client.Timeout; use context deadline for headers + pump's own idle/chunk timers for body |
 | Backpressure regression (Node paused upstream; Go writes block) | Loop `read → write → flush` naturally throttles upstream; verify with a slow-reader test client |
 | distroless has no shell/wget | `-healthcheck` mode in binary |
 | golangci-lint v1→v2 config format | Fresh `.golangci.yml` for v2.x at Phase 0 |

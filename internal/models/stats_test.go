@@ -149,7 +149,7 @@ func TestSnapshotSortsByLastSeenDesc(t *testing.T) {
 
 func TestSnapshotAveragesZeroWhenNoStart(t *testing.T) {
 	r := NewRecorder(100)
-	// A Result without a Start leaves Requests at 0, so averages must be 0 —
+	// A Result without a Start leaves Requests at 0, so averages must be 0,
 	// mirroring the Node `s.requests ? Math.round(...) : 0` guard.
 	r.Result("res-only", ResultArgs{StatusCode: 200, DurationMs: 10})
 	s := snapshotModel(t, r, "res-only")

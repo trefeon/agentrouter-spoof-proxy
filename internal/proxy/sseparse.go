@@ -11,7 +11,7 @@ import (
 // terminal (`event: message_stop` / `data: [DONE]`), data (at least one
 // non-comment field line) or noise (comment lines `: …` only, or `event: ping`
 // liveness frames). Raw chunks are forwarded verbatim regardless of this
-// analysis — the classifier only tracks what has been seen, so short events
+// analysis, the classifier only tracks what has been seen, so short events
 // and markers split across TCP chunks still count.
 type FrameClassifier struct {
 	carry          string

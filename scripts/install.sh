@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # SECURITY NOTE: this installer downloads and executes remote code over TLS
-# (GitHub releases, go.dev, get.docker.com). Review the script before piping it
+# from GitHub releases, go.dev and get.docker.com. Review it before piping
 # from the internet: https://github.com/trefeon/agentrouter-spoof-proxy/blob/main/scripts/install.sh
 
-# AgentRouter Spoof Proxy - Linux One-Line Installer
+# AgentRouter Spoof Proxy, Linux installer
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/trefeon/agentrouter-spoof-proxy/main/scripts/install.sh | bash
@@ -176,7 +176,7 @@ detect_arch() {
   esac
 }
 
-# Download the prebuilt binary from GitHub releases (Step A).
+# Download prebuilt binary from GitHub releases.
 download_prebuilt() {
   local dest="$1" os_arch url
   case "$(detect_arch)" in
@@ -200,8 +200,8 @@ download_prebuilt() {
   return 0
 }
 
-# Install Go 1.26+ from the official go.dev tarball (preferred when the
-# package manager ships an old golang-go).
+# Install Go 1.26+ from go.dev tarball. Preferred when the package manager
+# version is old.
 install_go_tarball() {
   local arch url tmp
   arch=$(detect_arch)
@@ -224,7 +224,7 @@ install_go_tarball() {
   return 0
 }
 
-# Ensure a Go toolchain >= 1.26 is available (Step B prerequisite).
+# Ensure Go 1.26+ is available.
 ensure_go() {
   if command -v go >/dev/null 2>&1; then
     local ver major minor
@@ -244,7 +244,7 @@ ensure_go() {
   pm=$(detect_pm)
   case "$pm" in
     apt)
-      # apt's golang-go can lag behind 1.26; prefer the official tarball.
+      # apt golang-go may lag behind 1.26, prefer official tarball.
       if confirm "Install Go $GO_MIN_VERSION+ from the official tarball (go.dev)"; then
         install_go_tarball && return 0
       fi
@@ -265,7 +265,7 @@ ensure_go() {
   return 1
 }
 
-# Build the binary from source in PROJECT_DIR (Step B).
+# Build binary from source in PROJECT_DIR.
 build_from_source() {
   local dest="$1"
   local src="${PROJECT_DIR:-$INSTALL_DIR}"
@@ -294,7 +294,7 @@ build_from_source() {
   return 0
 }
 
-# Step A -> B -> C: download prebuilt, fall back to source build.
+# Try prebuilt binary first, fall back to source build.
 obtain_binary() {
   local dest="$1"
   download_prebuilt "$dest"
@@ -498,7 +498,7 @@ run_systemd() {
 
   info "Installing agentrouter-proxy as a systemd service..."
 
-  # 1) Obtain and install the binary
+  # 1. Get and install binary
   if $DRY_RUN; then
     obtain_binary "$bin"
   else
@@ -514,7 +514,7 @@ run_systemd() {
     ok "Installed binary to $bin"
   fi
 
-  # 2) Environment file (/etc/agentrouter-proxy.env from the user's .env)
+  # 2. Copy env file to /etc/agentrouter-proxy.env
   if [ -f .env ] || $DRY_RUN; then
     run sudo_cmd cp .env "$env_file"
     ok "Installed environment to $env_file"
@@ -523,7 +523,7 @@ run_systemd() {
     exit 1
   fi
 
-  # 3) systemd unit
+  # 3. Install systemd unit
   if [ -f "$unit_src" ]; then
     run sudo_cmd cp "$unit_src" "$unit_dest"
   elif $DRY_RUN; then

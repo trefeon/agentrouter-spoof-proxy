@@ -548,8 +548,8 @@ func (w *stallWriter) Write(p []byte) (int, error) {
 // fails the stalled write, tears the stream down (body closed, result
 // reported) and the reader's blocked frameCh send is released.
 // Regression: OUTPUT blocked on w.Write forever, the cap-8 frameCh filled,
-// and the reader pinned on frameCh <- — the idle watchdog could not cancel
-// it, leaking the stream + upstream connection until the TCP layer gave up.
+// and the reader pinned on frameCh send, the idle watchdog could not cancel
+// it, leaking the stream and upstream connection until the TCP layer gave up.
 func TestPumpSSEClientStallDoesNotWedge(t *testing.T) {
 	body := &fakeBody{}
 	// Enough data to fill the cap-8 frameCh and pin the reader on a send

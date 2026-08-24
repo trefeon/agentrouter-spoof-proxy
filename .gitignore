@@ -25,6 +25,8 @@ docker-compose.override.yml
 .jules/
 .system_generated/
 scratch/
+.claude/
+skills-lock.json
 
 # Internal agent / dev prompt, planning, handoff, briefing, and progress markdown files
 PLAN*.md
