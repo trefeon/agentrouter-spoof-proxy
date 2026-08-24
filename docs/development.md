@@ -59,15 +59,15 @@ go test -race ./...    # race detector, needs cgo toolchain
 
 ## Project Layout
 
-- `cmd/proxy/main.go` — entry, config validation, signal handling
-- `internal/config` — env config and validation
-- `internal/auth` — spoof headers and WAF cookie handling
-- `internal/proxy` — handler, SSE pump, and pure helpers
-- `internal/models` — discovery, health, and stats
-- `internal/resilience` — circuit breaker
-- `internal/server` — routing and graceful shutdown
-- `testutil/mockupstream` — scripted mock upstream for tests
-- `e2e/` — E2E and regression tests
+- `cmd/proxy/main.go`: entry, config validation, signal handling
+- `internal/config`: env config and validation
+- `internal/auth`: spoof headers and WAF cookie handling
+- `internal/proxy`: handler, SSE pump, and pure helpers
+- `internal/models`: discovery, health, and stats
+- `internal/resilience`: circuit breaker
+- `internal/server`: routing and graceful shutdown
+- `testutil/mockupstream`: scripted mock upstream for tests
+- `e2e/`: E2E and regression tests
 
 ## Contributing
 
@@ -82,6 +82,6 @@ Private local notes stay in `docs/dev.md` which is gitignored. Public dev docs l
 
 ## Troubleshooting
 
-- `wafCookie: false` on `/health` — warmup is still running, wait 5 seconds and retry.
-- 9Router cannot reach proxy on Docker — put both on the same Docker network or use `host.docker.internal` on Windows and Mac.
-- SSE cuts early — check logs for `SLOW STREAM` and raise `SSE_CHUNK_TIMEOUT_MS` or `SSE_IDLE_TIMEOUT_MS`.
+- `wafCookie: false` on `/health`: warmup is still running, wait 5 seconds and retry.
+- 9Router cannot reach proxy on Docker: put both on the same Docker network or use `host.docker.internal` on Windows and Mac.
+- SSE cuts early: check logs for `SLOW STREAM` and raise `SSE_CHUNK_TIMEOUT_MS` or `SSE_IDLE_TIMEOUT_MS`.
