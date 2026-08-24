@@ -45,3 +45,4 @@ services:
       - net.ipv4.tcp_keepalive_intvl=10
       - net.ipv4.tcp_keepalive_probes=3
     restart: unless-stopped
+

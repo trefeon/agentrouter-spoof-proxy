@@ -288,3 +288,4 @@ func TestFrameClassifierCarryAcrossManyCalls(t *testing.T) {
 		t.Errorf("carry not drained after Flush: %q", c.carry)
 	}
 }
+

@@ -571,3 +571,4 @@ func TestHandlerClientDisconnect(t *testing.T) {
 		t.Errorf("unexpected response status %d written for disconnected client", rec.Code)
 	}
 }
+

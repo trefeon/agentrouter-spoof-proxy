@@ -80,3 +80,4 @@ func TestHeadersReturnFreshCopies(t *testing.T) {
 		t.Fatalf("SpoofHeaders() aliases caller-mutated map: got %q", got)
 	}
 }
+

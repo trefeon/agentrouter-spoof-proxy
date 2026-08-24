@@ -78,3 +78,4 @@ func IsWafBlock(statusCode int, body []byte) bool {
 	}
 	return false
 }
+

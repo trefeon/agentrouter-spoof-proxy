@@ -385,3 +385,4 @@ func TestProbeLoopSkipsWhenNoLocks(t *testing.T) {
 		t.Fatalf("probe loop must skip probing when there are no locks, made %d probes", log.count)
 	}
 }
+

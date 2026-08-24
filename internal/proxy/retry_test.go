@@ -125,3 +125,4 @@ func TestIsWafBlock(t *testing.T) {
 		})
 	}
 }
+

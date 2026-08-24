@@ -110,3 +110,4 @@ func TestBreakerOpenUntilBoundary(t *testing.T) {
 		t.Fatal("IsOpen must be false once the cooldown elapsed")
 	}
 }
+

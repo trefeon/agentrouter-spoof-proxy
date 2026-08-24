@@ -307,3 +307,4 @@ func TestStoreWarmupContextCancel(t *testing.T) {
 		t.Fatal("Warmup must return promptly on canceled context")
 	}
 }
+

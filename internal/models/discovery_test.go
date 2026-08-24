@@ -226,3 +226,4 @@ func stripScheme(u string) string {
 	}
 	return u
 }
+
