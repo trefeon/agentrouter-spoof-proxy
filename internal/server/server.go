@@ -105,8 +105,8 @@ func New(cfg *config.Config) *Server {
 		Handler:           s.mux(),
 		ReadHeaderTimeout: 30 * time.Second, // mirrors server.headersTimeout
 		IdleTimeout:       120 * time.Second,
-		// WriteTimeout is not set, it would kill SSE streaming
-		// (see docs/go-migration.md 3.10).
+		// WriteTimeout is not set, it would kill SSE streaming.
+		// See README for streaming details.
 	}
 	return s
 }
