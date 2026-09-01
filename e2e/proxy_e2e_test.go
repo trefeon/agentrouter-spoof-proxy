@@ -39,7 +39,7 @@ func defaultConfig(mock *mockupstream.MockUpstream) *config.Config {
 		BodyUploadTimeoutMs: 60000, SlowResponseMs: 30000,
 		WarmupIntervalMs: 600000, DiscoveryIntervalMs: 600000,
 		MaxRetries: 1, RetryDelayMs: 10, RetryOn5xx: false,
-		StripThinkingTags: true, ModelsCSV: "claude-opus-4-8,gpt-5.6-sol",
+		StripThinkingTags: true, ModelsCSV: "claude-opus-4-8,claude-opus-5,deepseek-v4-flash,glm-5.3,gpt-5.6-sol",
 		LogLevel: "info",
 	}
 }
@@ -312,15 +312,116 @@ func TestStaticModelList(t *testing.T) {
 	if !ok || len(data) < 1 {
 		t.Fatalf("data = %v, want non-empty array", body["data"])
 	}
-	found := false
-	for _, m := range data {
-		mm, _ := m.(map[string]any)
-		if mm["id"] == "claude-opus-4-8" {
-			found = true
+	for _, want := range []string{"claude-opus-4-8", "deepseek-v4-flash", "glm-5.3"} {
+		found := false
+		for _, m := range data {
+			mm, _ := m.(map[string]any)
+			if mm["id"] == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("static model %s missing from %v", want, data)
 		}
 	}
-	if !found {
-		t.Errorf("static model claude-opus-4-8 missing from %v", data)
+}
+
+// ── New proxy routes (OpenAI-style paths + local endpoints) ──────────────────
+
+func TestCompletionsProxied(t *testing.T) {
+	env := newEnv(t, nil)
+	env.Mock.SetScenario(mockupstream.ScenarioOpenaiStream)
+	status, raw, _ := stream(t, env, "/v1/completions", chatBody("gpt-5.6-sol"), proxyHeaders())
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(raw, "data: [DONE]") {
+		t.Errorf("completions stream must end with [DONE]: %q", raw)
+	}
+	r := lastPost(t, env)
+	if r.URL != "/v1/completions" {
+		t.Errorf("upstream URL = %q, want /v1/completions", r.URL)
+	}
+	if r.Headers.Get("Anthropic-Version") != "" {
+		t.Errorf("Anthropic-Version must NOT be passed to generic route, got %q", r.Headers.Get("Anthropic-Version"))
+	}
+}
+
+func TestResponsesProxied(t *testing.T) {
+	env := newEnv(t, nil)
+	env.Mock.SetScenario(mockupstream.ScenarioOpenaiStream)
+	status, raw, _ := stream(t, env, "/v1/responses",
+		`{"model":"gpt-5.6-sol","input":"hi","stream":true}`, proxyHeaders())
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(raw, "data: [DONE]") {
+		t.Errorf("responses stream must end with [DONE]: %q", raw)
+	}
+	r := lastPost(t, env)
+	if r.URL != "/v1/responses" {
+		t.Errorf("upstream URL = %q, want /v1/responses", r.URL)
+	}
+}
+
+func TestEmbeddingsProxied(t *testing.T) {
+	env := newEnv(t, nil)
+	env.Mock.SetScenario(mockupstream.ScenarioJson200)
+	status, body := postBody(t, env, "/v1/embeddings",
+		`{"model":"claude-opus-4-8","input":"hi"}`, proxyHeaders())
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(string(body), `"object":"list"`) {
+		t.Errorf("body = %q, want mock JSON passthrough", body)
+	}
+	r := lastPost(t, env)
+	if r.URL != "/v1/embeddings" {
+		t.Errorf("upstream URL = %q, want /v1/embeddings", r.URL)
+	}
+}
+
+func TestCountTokensLocal(t *testing.T) {
+	env := newEnv(t, nil)
+	before := env.Mock.PostCount()
+	status, body := postBody(t, env, "/v1/messages/count_tokens",
+		`{"model":"claude-opus-4-8","messages":[{"role":"user","content":"hello world"}]}`, proxyHeaders())
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("bad JSON %q: %v", body, err)
+	}
+	n, ok := payload["input_tokens"].(float64)
+	if !ok || n <= 0 {
+		t.Errorf("input_tokens = %v, want numeric > 0", payload["input_tokens"])
+	}
+	if env.Mock.PostCount() != before {
+		t.Errorf("count_tokens was forwarded upstream: PostCount %d -> %d", before, env.Mock.PostCount())
+	}
+}
+
+func TestRetrieveModel(t *testing.T) {
+	env := newEnv(t, nil)
+	status, body := getJSON(t, env, "/v1/models/claude-opus-4-8")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if id, _ := body["id"].(string); id != "claude-opus-4-8" {
+		t.Errorf("id = %v, want claude-opus-4-8", body["id"])
+	}
+
+	status, body = getJSON(t, env, "/v1/models/definitely-not-a-model")
+	if status != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", status)
+	}
+	msg := ""
+	if err, ok := body["error"].(map[string]any); ok {
+		msg, _ = err["message"].(string)
+	}
+	if !strings.Contains(msg, "definitely-not-a-model") {
+		t.Errorf("error.message = %q, want it to contain the model name", msg)
 	}
 }
 
@@ -367,19 +468,44 @@ func TestSpoofHeadersInjected(t *testing.T) {
 	env := newEnv(t, nil)
 	_, _, _ = stream(t, env, "/v1/messages", chatBody(""), proxyHeaders())
 	r := lastPost(t, env)
+	if !strings.Contains(r.Headers.Get("User-Agent"), "opencode") {
+		t.Errorf("User-Agent not spoofed as opencode (default): %q", r.Headers.Get("User-Agent"))
+	}
+	if r.Headers.Get("Anthropic-Version") == "" {
+		t.Error("Anthropic-Version missing")
+	}
+	if r.Headers.Get("Anthropic-Beta") == "" {
+		t.Error("Anthropic-Beta missing")
+	}
+	if !strings.Contains(r.Headers.Get("Anthropic-Beta"), "interleaved-thinking") {
+		t.Errorf("Anthropic-Beta should contain interleaved-thinking for opencode: %q", r.Headers.Get("Anthropic-Beta"))
+	}
+	if r.Headers.Get("Anthropic-Dangerous-Direct-Browser-Access") != "true" {
+		t.Error("Anthropic-Dangerous-Direct-Browser-Access missing")
+	}
+	if got := r.Headers.Get("X-Stainless-Runtime"); got != "" {
+		t.Errorf("X-Stainless-Runtime should NOT be present for opencode profile, got %q", got)
+	}
+}
+
+func TestSpoofHeadersClaudeCode(t *testing.T) {
+	env := newEnv(t, func(c *config.Config) { c.SpoofProfile = "claude-code" })
+	_, _, _ = stream(t, env, "/v1/messages", chatBody(""), proxyHeaders())
+	r := lastPost(t, env)
 	if !strings.Contains(r.Headers.Get("User-Agent"), "claude-cli") {
-		t.Errorf("User-Agent not spoofed: %q", r.Headers.Get("User-Agent"))
+		t.Errorf("User-Agent not spoofed as claude-cli: %q", r.Headers.Get("User-Agent"))
 	}
 	if r.Headers.Get("Anthropic-Version") == "" {
 		t.Error("Anthropic-Version missing")
 	}
 	if r.Headers.Get("X-Stainless-Runtime") == "" {
-		t.Error("X-Stainless-Runtime missing")
+		t.Error("X-Stainless-Runtime missing for claude-code profile")
 	}
 	if r.Headers.Get("Anthropic-Dangerous-Direct-Browser-Access") != "true" {
 		t.Error("Anthropic-Dangerous-Direct-Browser-Access missing")
 	}
 }
+
 
 func TestAuthorizationForwarded(t *testing.T) {
 	env := newEnv(t, nil)
@@ -396,11 +522,34 @@ func TestGenericSpoofHeadersNoAnthropic(t *testing.T) {
 	_, _, _ = stream(t, env, "/v1/chat/completions",
 		`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`, proxyHeaders())
 	r := lastPost(t, env)
+	if !strings.Contains(r.Headers.Get("User-Agent"), "opencode") {
+		t.Errorf("User-Agent not spoofed as opencode: %q", r.Headers.Get("User-Agent"))
+	}
+	if got := r.Headers.Get("X-Stainless-Runtime"); got != "" {
+		t.Errorf("X-Stainless-Runtime should NOT be present for opencode, got %q", got)
+	}
+	if r.Headers.Get("Anthropic-Version") != "" {
+		t.Errorf("Anthropic-Version must NOT be passed to OpenAI route, got %q", r.Headers.Get("Anthropic-Version"))
+	}
+	if r.Headers.Get("Anthropic-Beta") != "" {
+		t.Errorf("Anthropic-Beta must NOT be present on OpenAI route")
+	}
+	if r.Headers.Get("Anthropic-Dangerous-Direct-Browser-Access") != "" {
+		t.Errorf("Anthropic dangerous header must NOT be present on OpenAI route")
+	}
+}
+
+func TestGenericSpoofHeadersClaudeCode(t *testing.T) {
+	env := newEnv(t, func(c *config.Config) { c.SpoofProfile = "claude-code" })
+	env.Mock.SetScenario(mockupstream.ScenarioOpenaiStream)
+	_, _, _ = stream(t, env, "/v1/chat/completions",
+		`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`, proxyHeaders())
+	r := lastPost(t, env)
 	if !strings.Contains(r.Headers.Get("User-Agent"), "claude-cli") {
-		t.Errorf("User-Agent not spoofed: %q", r.Headers.Get("User-Agent"))
+		t.Errorf("User-Agent not spoofed as claude-cli: %q", r.Headers.Get("User-Agent"))
 	}
 	if r.Headers.Get("X-Stainless-Runtime") == "" {
-		t.Error("X-Stainless-Runtime missing")
+		t.Error("X-Stainless-Runtime missing for claude-code profile")
 	}
 	if r.Headers.Get("Anthropic-Version") != "" {
 		t.Errorf("Anthropic-Version must NOT be passed to OpenAI route, got %q", r.Headers.Get("Anthropic-Version"))
@@ -1332,3 +1481,225 @@ func Test5xxRetriedWhenRetryOn5xx(t *testing.T) {
 	}
 }
 
+// ── Dashboard API ─────────────────────────────────────────────────────────────
+
+// getJSONH performs a GET with extra headers and decodes the JSON body.
+func getJSONH(t *testing.T, env *Env, path string, headers map[string]string) (int, map[string]any) {
+	t.Helper()
+	resp := request(t, env, http.MethodGet, path, "", headers)
+	b := readBody(t, resp)
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("GET %s: bad JSON %q: %v", path, b, err)
+	}
+	return resp.StatusCode, m
+}
+
+// TestDashboardStatus verifies GET /api/status reports live proxy state
+// including the exposure mode from config.
+func TestDashboardStatus(t *testing.T) {
+	env := newEnv(t, func(c *config.Config) { c.ExposureMode = "pooled" })
+	status, m := getJSON(t, env, "/api/status")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if m["ok"] != true {
+		t.Errorf("ok = %v, want true", m["ok"])
+	}
+	if m["upstream"] != fmt.Sprintf("127.0.0.1:%d", env.Mock.Port()) {
+		t.Errorf("upstream = %v", m["upstream"])
+	}
+	if m["mode"] != "pooled" {
+		t.Errorf("mode = %v, want pooled", m["mode"])
+	}
+	if _, ok := m["modelSource"].(string); !ok {
+		t.Errorf("modelSource not a string: %v", m["modelSource"])
+	}
+	if n, ok := m["staticModels"].(float64); !ok || n < 1 {
+		t.Errorf("staticModels = %v, want >= 1", m["staticModels"])
+	}
+	if n, ok := m["availableModels"].(float64); !ok || n < 1 {
+		t.Errorf("availableModels = %v, want >= 1", m["availableModels"])
+	}
+	if _, ok := m["activeStreams"].(float64); !ok {
+		t.Errorf("activeStreams not a number: %v", m["activeStreams"])
+	}
+	if _, ok := m["wafCookie"].(bool); !ok {
+		t.Errorf("wafCookie not a bool: %v", m["wafCookie"])
+	}
+	if _, ok := m["circuitOpen"].(bool); !ok {
+		t.Errorf("circuitOpen not a bool: %v", m["circuitOpen"])
+	}
+	if _, ok := m["consecutiveFails"].(float64); !ok {
+		t.Errorf("consecutiveFails not a number: %v", m["consecutiveFails"])
+	}
+}
+
+// TestDashboardConfig verifies GET /api/config exposes server settings, model
+// list and the check-in configuration block.
+func TestDashboardConfig(t *testing.T) {
+	env := newEnv(t, func(c *config.Config) {
+		c.ExposureMode = "bridge"
+		c.CheckinCmd = "uv"
+		c.CheckinArgs = "run python checkin.py"
+		c.CheckinWorkdir = "/opt/checkin"
+		c.CheckinSchedule = true
+		c.CheckinWindowStart = "08:00"
+		c.CheckinWindowEnd = "22:00"
+	})
+	status, m := getJSON(t, env, "/api/config")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if m["baseUrl"] != "http://127.0.0.1:0" {
+		t.Errorf("baseUrl = %v, want http://127.0.0.1:0", m["baseUrl"])
+	}
+	if m["listenAddr"] != "127.0.0.1" {
+		t.Errorf("listenAddr = %v", m["listenAddr"])
+	}
+	if m["listenPort"] != float64(0) {
+		t.Errorf("listenPort = %v, want 0", m["listenPort"])
+	}
+	if m["upstream"] != fmt.Sprintf("127.0.0.1:%d", env.Mock.Port()) {
+		t.Errorf("upstream = %v", m["upstream"])
+	}
+	if m["mode"] != "bridge" {
+		t.Errorf("mode = %v, want bridge", m["mode"])
+	}
+	if m["proxyAuth"] != false {
+		t.Errorf("proxyAuth = %v, want false", m["proxyAuth"])
+	}
+	modelsArr, ok := m["models"].([]any)
+	if !ok || len(modelsArr) < 1 {
+		t.Fatalf("models = %v, want non-empty array", m["models"])
+	}
+	mm, _ := modelsArr[0].(map[string]any)
+	for _, k := range []string{"id", "object", "created", "owned_by"} {
+		if _, ok := mm[k]; !ok {
+			t.Errorf("model missing key %q: %v", k, mm)
+		}
+	}
+	ck, ok := m["checkin"].(map[string]any)
+	if !ok {
+		t.Fatalf("checkin = %v, want object", m["checkin"])
+	}
+	if ck["configured"] != true {
+		t.Errorf("checkin.configured = %v, want true", ck["configured"])
+	}
+	if ck["cmd"] != "uv" {
+		t.Errorf("checkin.cmd = %v, want uv", ck["cmd"])
+	}
+	if ck["args"] != "run python checkin.py" {
+		t.Errorf("checkin.args = %v", ck["args"])
+	}
+	if ck["workdir"] != "/opt/checkin" {
+		t.Errorf("checkin.workdir = %v, want /opt/checkin", ck["workdir"])
+	}
+	if ck["scheduleEnabled"] != true {
+		t.Errorf("checkin.scheduleEnabled = %v, want true", ck["scheduleEnabled"])
+	}
+	if ck["windowStart"] != "08:00" || ck["windowEnd"] != "22:00" {
+		t.Errorf("checkin window = %v / %v, want 08:00 / 22:00", ck["windowStart"], ck["windowEnd"])
+	}
+}
+
+// TestDashboardModeSet verifies POST /api/mode accepts valid modes, persists
+// them for GET /api/mode, and rejects invalid values with the fixed 400 shape.
+func TestDashboardModeSet(t *testing.T) {
+	env := newEnv(t, nil)
+
+	status, body := postBody(t, env, "/api/mode", `{"mode":"bridge"}`, nil)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["mode"] != "bridge" {
+		t.Errorf("mode = %v, want bridge", got["mode"])
+	}
+
+	status, m := getJSON(t, env, "/api/mode")
+	if status != http.StatusOK || m["mode"] != "bridge" {
+		t.Errorf("GET /api/mode = %d %v, want 200 bridge", status, m["mode"])
+	}
+
+	status, body = postBody(t, env, "/api/mode", `{"mode":"bogus"}`, nil)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", status)
+	}
+	var em map[string]any
+	if err := json.Unmarshal(body, &em); err != nil {
+		t.Fatal(err)
+	}
+	errObj, _ := em["error"].(map[string]any)
+	if errObj["message"] != "invalid mode" || errObj["type"] != "proxy_error" {
+		t.Errorf("error = %v, want invalid mode / proxy_error", errObj)
+	}
+}
+
+// TestDashboardLogs verifies /api/logs is auth-gated, lists entries newest
+// first after a proxied request, and honors the level filter.
+func TestDashboardLogs(t *testing.T) {
+	env := authEnv(t)
+	token := map[string]string{"X-Proxy-Token": "test-proxy-secret-token"}
+
+	status, _ := getJSON(t, env, "/api/logs")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("status without token = %d, want 401", status)
+	}
+
+	status, m := getJSONH(t, env, "/api/logs", token)
+	if status != http.StatusOK {
+		t.Fatalf("status with token = %d, want 200", status)
+	}
+	if entries, ok := m["entries"].([]any); !ok || len(entries) != 0 {
+		t.Fatalf("entries before any request = %v, want empty array", m["entries"])
+	}
+
+	hdr := proxyHeaders()
+	hdr["X-Proxy-Token"] = "test-proxy-secret-token"
+	status, _, _ = stream(t, env, "/v1/messages", chatBody(""), hdr)
+	if status != http.StatusOK {
+		t.Fatalf("proxied request status = %d, want 200", status)
+	}
+
+	status, m = getJSONH(t, env, "/api/logs", token)
+	if status != http.StatusOK {
+		t.Fatalf("status after request = %d, want 200", status)
+	}
+	entries, _ := m["entries"].([]any)
+	if len(entries) == 0 {
+		t.Fatal("no log entries after a proxied request")
+	}
+	first, _ := entries[0].(map[string]any)
+	if first["status"] != float64(200) || first["level"] != "info" {
+		t.Errorf("newest entry = %v, want info with status 200", first)
+	}
+
+	// The error filter must exclude the info entry.
+	status, m = getJSONH(t, env, "/api/logs?level=error", token)
+	if status != http.StatusOK {
+		t.Fatalf("status level=error = %d, want 200", status)
+	}
+	if entries, _ := m["entries"].([]any); len(entries) != 0 {
+		t.Errorf("level=error returned %d entries, want none", len(entries))
+	}
+}
+
+// TestDashboardRootServed verifies GET / serves the embedded dashboard HTML.
+func TestDashboardRootServed(t *testing.T) {
+	env := newEnv(t, nil)
+	resp := request(t, env, http.MethodGet, "/", "", nil)
+	b := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+	if !strings.Contains(string(b), "<html") {
+		t.Error("dashboard body does not contain <html")
+	}
+}

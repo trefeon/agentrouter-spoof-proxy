@@ -18,7 +18,9 @@ import (
 	"time"
 
 	"github.com/trefeon/agentrouter-spoof-proxy/internal/auth"
+	"github.com/trefeon/agentrouter-spoof-proxy/internal/checkin"
 	"github.com/trefeon/agentrouter-spoof-proxy/internal/config"
+	"github.com/trefeon/agentrouter-spoof-proxy/internal/logstore"
 	"github.com/trefeon/agentrouter-spoof-proxy/internal/models"
 	"github.com/trefeon/agentrouter-spoof-proxy/internal/proxy"
 	"github.com/trefeon/agentrouter-spoof-proxy/internal/resilience"
@@ -41,6 +43,9 @@ type Server struct {
 	health    *models.Health
 	recorder  *models.Recorder
 	active    *atomic.Int64
+	logs      *logstore.Store
+	checkin   *checkin.Manager
+	mode      atomic.Value
 }
 
 // New builds the dependency graph, starts scheduler goroutines on an
@@ -61,7 +66,8 @@ func New(cfg *config.Config) *Server {
 	recorder := models.NewRecorder(cfg.SlowResponseMs)
 	client := &http.Client{Transport: cfg.Transport()}
 	active := &atomic.Int64{}
-	handler := proxy.NewHandler(cfg, wafStore, breaker, discovery, health, recorder, client, logger)
+	logs := logstore.NewStore(500)
+	handler := proxy.NewHandler(cfg, wafStore, breaker, discovery, health, recorder, client, logger, logs)
 
 	s := &Server{
 		cfg:       cfg,
@@ -73,10 +79,18 @@ func New(cfg *config.Config) *Server {
 		health:    health,
 		recorder:  recorder,
 		active:    active,
+		logs:      logs,
 	}
+
+	s.mode.Store(cfg.ExposureMode)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
+
+	checkinMgr := checkin.New(cfg.CheckinCmd, cfg.CheckinArgs, cfg.CheckinWorkdir,
+		cfg.CheckinSchedule, cfg.CheckinWindowStart, cfg.CheckinWindowEnd, logger)
+	s.checkin = checkinMgr
+	checkinMgr.Start(ctx)
 
 	// Schedulers, goroutines tied to ctx and tracked by wg.
 	s.wg.Add(1)
@@ -92,7 +106,10 @@ func New(cfg *config.Config) *Server {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		health.ProbeLoop(ctx, client, cfg.TargetHost, cfg.TargetPort, auth.SpoofHeaders, wafStore.Get)
+		// Probe uses the active spoof profile's Anthropic headers (POST /v1/messages).
+		profile := cfg.NormalizedSpoofProfile()
+		headersFn := func() map[string]string { return auth.SpoofHeadersForProfile(profile) }
+		health.ProbeLoop(ctx, client, cfg.TargetHost, cfg.TargetPort, headersFn, wafStore.Get)
 	}()
 	s.wg.Add(1)
 	go func() {
@@ -123,6 +140,24 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	err := s.HTTP.Shutdown(ctx)
 	s.wg.Wait()
 	return err
+}
+
+// Mode returns the current exposure mode ("auto", "pooled" or "bridge").
+func (s *Server) Mode() string {
+	if v, ok := s.mode.Load().(string); ok && v != "" {
+		return v
+	}
+	return "auto"
+}
+
+// SetMode validates and stores a new exposure mode.
+func (s *Server) SetMode(m string) error {
+	switch m {
+	case "auto", "pooled", "bridge":
+		s.mode.Store(m)
+		return nil
+	}
+	return fmt.Errorf("invalid mode %q", m)
 }
 
 // Schedulers
@@ -179,9 +214,24 @@ func (s *Server) resolveDNS(ctx context.Context) {
 // proxyRoutes is the allowlist of paths that proxy upstream (utils.mjs
 // PROXY_ROUTES).
 var proxyRoutes = map[string]bool{
-	"/v1/messages":         true,
-	"/messages":            true,
-	"/v1/chat/completions": true,
+	"/v1/messages":             true,
+	"/messages":                true,
+	"/v1/chat/completions":     true,
+	"/v1/completions":          true,
+	"/v1/responses":            true,
+	"/v1/responses/compact":    true,
+	"/v1/embeddings":           true,
+	"/v1/moderations":          true,
+	"/v1/rerank":               true,
+	"/v1/edits":                true,
+	"/v1/images/generations":   true,
+	"/v1/images/edits":         true,
+	"/v1/audio/transcriptions": true,
+	"/v1/audio/translations":   true,
+	"/v1/audio/speech":         true,
+	"/v1/alpha/search":         true,
+	// Method-gating only; POST /v1/messages/count_tokens is served locally.
+	"/v1/messages/count_tokens": true,
 }
 
 func isProxyRoute(rawPath string) bool {
@@ -200,6 +250,17 @@ func (s *Server) mux() http.Handler {
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /models", s.handleModels)
 
+	// Admin dashboard: embedded UI at the root plus its API. All handlers
+	// gate on proxy auth like the proxy routes.
+	mux.HandleFunc("GET /{$}", s.handleDashboard)
+	mux.HandleFunc("GET /api/status", s.handleDashStatus)
+	mux.HandleFunc("GET /api/config", s.handleDashConfig)
+	mux.HandleFunc("GET /api/mode", s.handleDashModeGet)
+	mux.HandleFunc("POST /api/mode", s.handleDashModeSet)
+	mux.HandleFunc("GET /api/logs", s.handleDashLogs)
+	mux.HandleFunc("GET /api/checkin/status", s.handleCheckinStatus)
+	mux.HandleFunc("POST /api/checkin/run", s.handleCheckinRun)
+
 	// Proxy routes, auth-gated POST handlers.
 	proxyH := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !requireProxyAuth(r, s.cfg.ProxyAuthToken) {
@@ -211,6 +272,25 @@ func (s *Server) mux() http.Handler {
 	mux.HandleFunc("POST /v1/messages", proxyH)
 	mux.HandleFunc("POST /v1/chat/completions", proxyH)
 	mux.HandleFunc("POST /messages", proxyH)
+	mux.HandleFunc("POST /v1/completions", proxyH)
+	mux.HandleFunc("POST /v1/responses", proxyH)
+	mux.HandleFunc("POST /v1/responses/compact", proxyH)
+	mux.HandleFunc("POST /v1/embeddings", proxyH)
+	mux.HandleFunc("POST /v1/moderations", proxyH)
+	mux.HandleFunc("POST /v1/rerank", proxyH)
+	mux.HandleFunc("POST /v1/edits", proxyH)
+	mux.HandleFunc("POST /v1/images/generations", proxyH)
+	mux.HandleFunc("POST /v1/images/edits", proxyH)
+	mux.HandleFunc("POST /v1/audio/transcriptions", proxyH)
+	mux.HandleFunc("POST /v1/audio/translations", proxyH)
+	mux.HandleFunc("POST /v1/audio/speech", proxyH)
+	mux.HandleFunc("POST /v1/alpha/search", proxyH)
+
+	// Local endpoint: token estimation never reaches the upstream.
+	mux.HandleFunc("POST /v1/messages/count_tokens", s.handleCountTokens)
+
+	// Model retrieval; the exact GET /v1/models route stays registered above.
+	mux.HandleFunc("GET /v1/models/{model}", s.handleModelRetrieve)
 
 	// Catch-all for unknown paths, wrong methods and non-GET on health or models.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -305,4 +385,44 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		"data":   s.health.HealthyModels(s.discovery.List()),
 		"object": "list",
 	})
+}
+
+// handleModelRetrieve serves GET /v1/models/{model} with the OpenAI model
+// retrieval shape. A healthy match returns the model itself, anything else
+// is a 404 naming the requested id.
+func (s *Server) handleModelRetrieve(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("model")
+	for _, m := range s.health.HealthyModels(s.discovery.List()) {
+		if m.ID == id {
+			respondJSON(w, http.StatusOK, m)
+			return
+		}
+	}
+	respondJSON(w, http.StatusNotFound, map[string]any{
+		"error": map[string]any{
+			"message": fmt.Sprintf("The model '%s' does not exist", id),
+			"type":    "invalid_request_error",
+			"code":    "model_not_found",
+		},
+	})
+}
+
+// handleCountTokens serves POST /v1/messages/count_tokens locally. Auth is
+// gated like the proxy routes, the body is size-bounded, and the upstream is
+// never contacted.
+func (s *Server) handleCountTokens(w http.ResponseWriter, r *http.Request) {
+	if !requireProxyAuth(r, s.cfg.ProxyAuthToken) {
+		rejectLocally(w, r, http.StatusUnauthorized, "unauthorized", "Invalid or missing proxy auth token")
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, proxy.MaxBodySize+1))
+	if err != nil {
+		rejectLocally(w, r, http.StatusBadRequest, "bad_request", "Failed to read request body")
+		return
+	}
+	if len(raw) > proxy.MaxBodySize {
+		rejectLocally(w, r, http.StatusRequestEntityTooLarge, "payload_too_large", "Request body too large")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"input_tokens": proxy.EstimateInputTokens(raw)})
 }

@@ -19,6 +19,10 @@ type FrameClassifier struct {
 	sawMessageStop bool
 	onMessageStop  func()
 	logDebug       func(format string, args ...any)
+	inputTokens    int
+	outputTokens   int
+	cacheRead      int
+	cacheWrite     int
 }
 
 // NewFrameClassifier returns a classifier with empty carry. The callbacks may
@@ -70,6 +74,13 @@ func (c *FrameClassifier) SawMessageStop() bool {
 	return c.sawMessageStop
 }
 
+// Usage returns the token totals accumulated from every data frame that
+// carried usage fields (Anthropic message_start/message_delta or OpenAI
+// chunks).
+func (c *FrameClassifier) Usage() Usage {
+	return Usage{Input: c.inputTokens, Output: c.outputTokens, CacheRead: c.cacheRead, CacheWrite: c.cacheWrite}
+}
+
 func (c *FrameClassifier) classifyBlock(block string) {
 	if strings.TrimSpace(block) == "" {
 		return
@@ -102,6 +113,11 @@ func (c *FrameClassifier) classifyBlock(block string) {
 				}
 			} else if dataStr != "" {
 				c.tokenUsage(dataStr)
+				u := UsageFromFrame([]byte(dataStr))
+				c.inputTokens += u.Input
+				c.outputTokens += u.Output
+				c.cacheRead += u.CacheRead
+				c.cacheWrite += u.CacheWrite
 			}
 		} else if strings.HasPrefix(lower, "event:") {
 			if strings.TrimSpace(trimmed[6:]) == "message_stop" {

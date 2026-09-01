@@ -84,7 +84,7 @@ Wait 5 seconds if `wafCookie: false`. WAF warmup runs at startup.
    - **Base URL:** `http://localhost:8318/v1` (or `http://172.18.0.3:8318/v1` if Docker-to-Docker)
 3. Click **Import from /models**
 4. **Add API Key** → paste your AgentRouter API key (store it only in 9Router, not in the proxy)
-5. Model will appear as `AG-gpt-5.6-sol`, `AG-claude-opus-5`, etc.
+5. Model will appear as `AG-gpt-5.6-sol`, `AG-claude-opus-5`, `AG-deepseek-v4-flash`, `AG-glm-5.3`, etc.
 
 > Windows Docker Desktop: use `http://host.docker.internal:8318/v1`
 
@@ -92,14 +92,11 @@ Wait 5 seconds if `wafCookie: false`. WAF warmup runs at startup.
 
 ## Features
 
-| Feature | How |
-|---------|-----|
-| **WAF bypass** | Spoofs Claude Code CLI headers and maintains `acw_tc` cookies |
+| **WAF bypass** | Spoofs first-party CLI headers (default **opencode**, configurable via `SPOOF_PROFILE`) and maintains `acw_tc` cookies |
 | **SSE streaming** | Proxies with backpressure and keepalives, handles end of message per format, never cuts a live stream |
 | **Retry logic** | Retries transport errors with exponential backoff, 5xx retry is configurable (`RETRY_ON_5XX`) |
 | **Thinking tag stripping** | Removes `<think>...</think>` from OpenAI-format SSE streams, Anthropic thinking blocks pass through (`STRIP_THINKING_TAGS`) |
-| **Model-aware headers** | Sends Anthropic headers for `/v1/messages`, generic headers for `/v1/chat/completions` |
-| **Circuit breaker** | Opens after 5 consecutive final 5xx or transport failures, exponential cooldown capped at 600s |
+| **Model-aware headers** | Sends Anthropic headers for `/v1/messages`, generic headers for `/v1/chat/completions`; header set is profile-aware |
 | **Auto model health** | Removes failing models from `/v1/models` so 9Router can fall back right away |
 | **Model recovery** | Background probe every 60s with spoof headers and WAF cookie |
 | **Prompt injection** | Optional system prompt injection (`INJECT_SYSTEM_PROMPT`) |
@@ -151,14 +148,38 @@ All values have defaults. Copy `.env.example` to `.env` only if you need to chan
 | `RETRY_DELAY_MS` | `1000` | Base backoff delay. Actual delay is `RETRY_DELAY_MS × 2^attempt` |
 | `RETRY_ON_5XX` | `false` | Also retry on 5xx responses (warning: causes double token billing) |
 | `STRIP_THINKING_TAGS` | `true` | Remove `<think>...</think>` from OpenAI-format SSE text. Anthropic thinking blocks pass through |
-| `MODELS_CSV` | `gpt-5.6-sol,claude-opus-5,claude-opus-4-8` | Static fallback model list (used when `AR_API_KEY` is not set) |
+| `SPOOF_PROFILE` | `opencode` | Which CLI to impersonate upstream: `opencode` (default), `claude-code`, `codex`, `qwen`, `cline`, `roo`, `kilo`, `cursor`, `trae`, `pi`, `openclaw`, `hermes`, `droid`, `copilot`, `gemini`, `generic`. Add reference clones under `reference/` to craft new profiles in `internal/auth/profile.go` |
+| `MODELS_CSV` | `claude-opus-4-8,claude-opus-5,deepseek-v4-flash,glm-5.3,gpt-5.6-sol` | Static fallback model list (used when `AR_API_KEY` is not set) |
 | `AR_API_KEY` | _(empty)_ | Enable dynamic model discovery |
 | `DISCOVERY_INTERVAL_MS` | `600000` | Dynamic model discovery refresh interval |
 | `INJECT_SYSTEM_PROMPT` | _(empty)_ | System prompt injected into requests |
-| `SLOW_RESPONSE_MS` | `30000` | Temporarily marks slow successful streams as degraded |
-| `LOG_LEVEL` | `info` | `info` or `debug` |
+| `EXPOSURE_MODE` | `auto` | Dashboard mode: `auto` (per-request format auto-detect), `pooled` (one endpoint+key), `bridge` (per-model configs) |
 
-See `.env.example` for the full list.
+The proxy serves a minimal embedded admin dashboard at the root URL
+(`http://localhost:8318/`). It works on desktop and mobile, needs no build
+step, and exposes:
+
+- **Overview**: upstream health, WAF cookie, circuit breaker, active streams
+  and model counts.
+- **Models**: the current model list with metadata.
+- **Client Generator**: ready-to-use client configs in several formats
+  (OpenAI curl/Python/Node, Anthropic Claude Code env, 9Router provider JSON,
+  opencode JSON, Codex TOML) in `pooled` mode (one endpoint and key for all
+  models) or `bridge` mode (one config block per model). The default
+  `auto` mode keeps per-request format auto-detection active.
+- **Logs**: request log with token usage (in/out, cache) and error log, with
+  All/Errors filter and live refresh.
+- **Check-in**: run the AgentRouter daily check-in from the UI and see the
+  last run output. Requires `CHECKIN_WORKDIR` pointing at the
+  `checkin-agentrouter` checkout.
+- **Settings**: switch the exposure mode (`auto`/`pooled`/`bridge`) at
+  runtime and optionally set the proxy auth token for the browser session.
+
+Dashboard API endpoints (`/api/status`, `/api/config`, `/api/mode`,
+`/api/logs`, `/api/checkin/status`, `/api/checkin/run`) require the proxy auth
+token (Bearer or `X-Proxy-Token`) when `PROXY_AUTH_TOKEN` is set.
+
+## Models
 
 ### Retry behavior and token billing
 
@@ -194,16 +215,27 @@ client supports thinking content.
 
 ### Model-aware headers
 
-The proxy applies different spoof headers based on the request format:
-- **`/v1/messages`** (Anthropic): full Claude Code headers including `Anthropic-Beta`,
-  `Anthropic-Version`, etc.
-- **`/v1/chat/completions`** (OpenAI): generic `claude-cli` User-Agent and `X-Stainless-*`
-  headers only. No `anthropic-*` headers are sent.
+The proxy applies different spoof headers based on request format **and** the
+active spoof profile (`SPOOF_PROFILE`, default `opencode`):
+- **`/v1/messages`** (Anthropic): full profile-aware spoof including
+  `Anthropic-Version` + `Anthropic-Beta` (opencode uses
+  `interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14`,
+  claude-code uses the full Claude Code beta list) + profile-specific
+  `User-Agent`/`X-App`.
+- **`/v1/chat/completions`** (OpenAI): only the profile's generic headers
+  (`User-Agent` + `X-App`, e.g. `opencode/1.18.25` or `codex-cli/0.52.0`).
+  No `anthropic-*` or `X-Stainless-*` headers are sent except for the
+  `claude-code` profile which keeps its `X-Stainless-*` set for backwards
+  compatibility.
 
-The proxy owns the canonical `Anthropic-Version` and `Anthropic-Beta` spoof values.
-A client-supplied `anthropic-version` on `/v1/messages` is ignored so the
-spoofed identity stays intact. WAF cookies are also refreshed from API responses,
-not just the warmup loop, so rotated session cookies are picked up right away.
+The proxy owns the canonical `Anthropic-Version` and `Anthropic-Beta` spoof
+values for each profile. A client-supplied `anthropic-version` on
+`/v1/messages` is ignored so the spoofed identity stays intact. WAF cookies
+are also refreshed from API responses, not just the warmup loop, so rotated
+session cookies are picked up right away. To add a new CLI, clone its repo
+under `reference/` (e.g. `reference/opencode` already cloned) and add a case
+to `internal/auth/profile.go` → `GenericHeadersForProfile` /
+`AnthropicHeadersForProfile`; set `SPOOF_PROFILE` to the new name.
 
 ---
 
@@ -214,14 +246,13 @@ not just the warmup loop, so rotated session cookies are picked up right away.
 | `gpt-5.6-sol` | 1.05M | 128K | $5 / $30 | [OpenAI](https://developers.openai.com/api/docs/models/gpt-5.6-sol) |
 | `claude-opus-5` | 1M | 128K | $5 / $25 | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) |
 | `claude-opus-4-8` | 1M | 128K | $5 / $25 | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) |
-
----
+| `deepseek-v4-flash` | — | — | — | [DeepSeek](https://api-docs.deepseek.com/) |
+| `glm-5.3` | — | — | — | [Zhipu/Z.ai](https://open.bigmodel.cn/) |
 
 ## Architecture
-
 ```
 Client → 9Router → agentrouter-proxy:8318 → agentrouter.org (upstream)
-                        ├── Spoof headers (Claude Code CLI)
+                        ├── Spoof headers (opencode default, profile-aware)
                         ├── WAF cookie management
                         ├── Model health monitoring
                         └── SSE streaming + backpressure
@@ -236,7 +267,7 @@ cmd/proxy/main.go: thin entry, config validation, signal shutdown, -healthcheck 
 ├── internal/proxy: handler (retry loop), SSE pump, pure helpers (think-strip, frame parser)
 ├── internal/server: routing, schedulers, graceful shutdown
 ├── testutil/mockupstream: scripted mock upstream for tests
-└── e2e: 62 E2E and 7 issue-regression tests
+└── e2e: 67 E2E and 7 issue-regression tests
 ```
 
 ---

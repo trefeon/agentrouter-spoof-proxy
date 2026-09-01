@@ -237,6 +237,8 @@ Model yang akan muncul:
 - `gpt-5.6-sol`
 - `claude-opus-5`
 - `claude-opus-4-8`
+- `deepseek-v4-flash`
+- `glm-5.3`
 
 Kalau kamu aktifkan **Model Auto-Discovery** (pakai `AR_API_KEY`), daftar model akan mengikuti akun agentrouter.org kamu, jadi selalu update.
 
@@ -339,6 +341,8 @@ Masukkan API key 9Router (bukan API key agentrouter).
 | `AG-gpt-5.6-sol` | [OpenAI](https://developers.openai.com/api/docs/models/gpt-5.6-sol) | 1.05M | 128K | $5 / $30 |
 | `AG-claude-opus-5` | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) | 1M | 128K | $5 / $25 |
 | `AG-claude-opus-4-8` | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) | 1M | 128K | $5 / $25 |
+| `AG-deepseek-v4-flash` | [DeepSeek](https://api-docs.deepseek.com/) | — | — | — |
+| `AG-glm-5.3` | [Zhipu/Z.ai](https://open.bigmodel.cn/) | — | — | — |
 
 ---
 
@@ -347,7 +351,7 @@ Masukkan API key 9Router (bukan API key agentrouter).
 Versi terbaru proxy lebih ketat soal permukaan yang di-expose:
 
 - **Bind address default `127.0.0.1`**, di host cuma bisa diakses dari lokal. Kalau butuh akses Docker ke Docker atau remote, set `LISTEN_ADDRESS=0.0.0.0` di `.env`.
-- **Cuma tiga route yang di-proxy**: `/v1/messages`, `/messages`, `/v1/chat/completions`. Path lain dibalas `404` lokal, method selain POST dibalas `405`. Tidak ada path yang bocor ke upstream.
+- **Route yang di-proxy**: `/v1/messages`, `/messages`, `/v1/chat/completions`, plus permukaan OpenAI lain (`/v1/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/moderations`, `/v1/rerank`, `/v1/edits`, `/v1/images/*`, `/v1/audio/*`, `/v1/alpha/search`). `POST /v1/messages/count_tokens` dan `GET /v1/models/{model}` dilayani lokal. Path lain dibalas `404`, method selain yang terdaftar dibalas `405`. Tidak ada path yang bocor ke upstream.
 - **Auth opsional**, kalau set `PROXY_AUTH_TOKEN`, setiap request yang di-proxy wajib bawa token lewat `Authorization: Bearer <token>` atau `X-Proxy-Token: <token>`. Dibandingin pakai constant-time dan tidak pernah di-log. `/health` dan `/v1/models` tetap terbuka tanpa secret biar probe Docker atau 9Router tetap jalan.
 - Kalau proxy ke-expose di jaringan bersama atau internet, selalu set `PROXY_AUTH_TOKEN` dan isi sebagai Bearer token di 9Router.
 

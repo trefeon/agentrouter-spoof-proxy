@@ -24,7 +24,7 @@ services:
       - TARGET_HOST=${TARGET_HOST:-agentrouter.org}
       - TARGET_PORT=${TARGET_PORT:-443}
       - REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS:-300000}
-      - MODELS_CSV=${MODELS_CSV:-gpt-5.6-sol,claude-opus-5,claude-opus-4-8}
+      - MODELS_CSV=${MODELS_CSV:-claude-opus-4-8,claude-opus-5,deepseek-v4-flash,glm-5.3,gpt-5.6-sol}
       - WARMUP_INTERVAL_MS=${WARMUP_INTERVAL_MS:-180000}
       - MAX_RETRIES=${MAX_RETRIES:-2}
       - RETRY_DELAY_MS=${RETRY_DELAY_MS:-1000}
@@ -37,9 +37,19 @@ services:
       - BODY_UPLOAD_TIMEOUT_MS=${BODY_UPLOAD_TIMEOUT_MS:-60000}
       - SLOW_RESPONSE_MS=${SLOW_RESPONSE_MS:-30000}
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      - SPOOF_PROFILE=${SPOOF_PROFILE:-opencode}
       # Optional inbound auth token. Recommended whenever the proxy is exposed
       # beyond localhost or the private Docker network.
       - PROXY_AUTH_TOKEN=${PROXY_AUTH_TOKEN:-}
+      # Dashboard exposure mode: auto | pooled | bridge.
+      - EXPOSURE_MODE=${EXPOSURE_MODE:-auto}
+      # Auto check-in from the dashboard (shell-out to checkin-agentrouter CLI).
+      - CHECKIN_CMD=${CHECKIN_CMD:-uv}
+      - CHECKIN_ARGS=${CHECKIN_ARGS:-run python checkin.py}
+      - CHECKIN_WORKDIR=${CHECKIN_WORKDIR:-}
+      - CHECKIN_SCHEDULE=${CHECKIN_SCHEDULE:-false}
+      - CHECKIN_RANDOM_WINDOW_START=${CHECKIN_RANDOM_WINDOW_START:-08:00}
+      - CHECKIN_RANDOM_WINDOW_END=${CHECKIN_RANDOM_WINDOW_END:-22:00}
     sysctls:
       - net.ipv4.tcp_keepalive_time=60
       - net.ipv4.tcp_keepalive_intvl=10

@@ -49,11 +49,17 @@ systemctl status agentrouter-proxy
 ## Test
 
 ```bash
-go test ./...          # all tests, about 222 across 9 packages
+go test ./...          # all tests, about 257 across 9 packages
 go test ./internal/... # unit only
 go test ./e2e/         # E2E with mock upstream
 go test -race ./...    # race detector, needs cgo toolchain
 ```
+
+> Windows sandbox note: when `go test` fails on `internal/checkin` with
+> `fork/exec ... checkin.test.exe: Access is denied`, the MSYS2-gcc-linked
+> cgo test binary is being blocked by the sandbox, not by the code. Run
+> `CGO_ENABLED=0 go test ./...` instead (the Docker build is already
+> CGO_ENABLED=0 static). The tests themselves are green.
 
 `make check` runs vet, lint, and tests if `golangci-lint` is installed.
 
@@ -66,6 +72,9 @@ go test -race ./...    # race detector, needs cgo toolchain
 - `internal/models`: discovery, health, and stats
 - `internal/resilience`: circuit breaker
 - `internal/server`: routing and graceful shutdown
+- `internal/logstore`: ring-buffer request/error log for the dashboard
+- `internal/checkin`: check-in command runner and scheduler
+- `internal/dashboard`: embedded admin web UI
 - `testutil/mockupstream`: scripted mock upstream for tests
 - `e2e/`: E2E and regression tests
 

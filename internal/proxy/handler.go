@@ -41,6 +41,7 @@ import (
 
 	"github.com/trefeon/agentrouter-spoof-proxy/internal/auth"
 	"github.com/trefeon/agentrouter-spoof-proxy/internal/config"
+	"github.com/trefeon/agentrouter-spoof-proxy/internal/logstore"
 	"github.com/trefeon/agentrouter-spoof-proxy/internal/models"
 	"github.com/trefeon/agentrouter-spoof-proxy/internal/resilience"
 )
@@ -57,10 +58,11 @@ type Handler struct {
 	Client    *http.Client
 	Active    *atomic.Int64
 	Log       *slog.Logger
+	Logs      *logstore.Store
 }
 
 // NewHandler wires the injected dependencies into a Handler.
-func NewHandler(cfg *config.Config, wafStore *auth.Store, breaker *resilience.Breaker, discovery *models.Discovery, health *models.Health, recorder *models.Recorder, client *http.Client, log *slog.Logger) *Handler {
+func NewHandler(cfg *config.Config, wafStore *auth.Store, breaker *resilience.Breaker, discovery *models.Discovery, health *models.Health, recorder *models.Recorder, client *http.Client, log *slog.Logger, logs *logstore.Store) *Handler {
 	return &Handler{
 		Cfg:       cfg,
 		WAF:       wafStore,
@@ -71,6 +73,14 @@ func NewHandler(cfg *config.Config, wafStore *auth.Store, breaker *resilience.Br
 		Client:    client,
 		Active:    &atomic.Int64{},
 		Log:       log,
+		Logs:      logs,
+	}
+}
+
+// logEntry records a dashboard log entry; a nil store is a no-op.
+func (h *Handler) logEntry(e logstore.Entry) {
+	if h.Logs != nil {
+		h.Logs.Add(e)
 	}
 }
 
@@ -80,11 +90,13 @@ func NewHandler(cfg *config.Config, wafStore *auth.Store, breaker *resilience.Br
 func (h *Handler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 	rawPath := r.URL.RequestURI()
 	method := r.Method
-
+	path := RewritePath(rawPath)
+	streamFormat := StreamFormatForPath(path)
 
 	// Early Content-Length check: reject before buffering any bytes.
 	if r.ContentLength > MaxBodySize {
 		h.Log.Info(fmt.Sprintf("%s %s -> REJECTED 413 (payload_too_large)", method, rawPath))
+		h.logEntry(logstore.Entry{Time: time.Now(), Level: logstore.LevelError, Path: rawPath, Format: string(streamFormat), Status: http.StatusRequestEntityTooLarge, Error: "payload_too_large"})
 		h.rejectBody(w, r, http.StatusRequestEntityTooLarge, "payload_too_large", "Request body exceeds 20MB limit", true)
 		return
 	}
@@ -100,6 +112,7 @@ func (h *Handler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 			// body never arrives, so draining would block the handler.
 			h.Log.Info(fmt.Sprintf("%s %s -> REJECTED %d (%s)",
 				method, rawPath, rejected, rejectionCode(rejected)))
+			h.logEntry(logstore.Entry{Time: time.Now(), Level: logstore.LevelError, Path: rawPath, Format: string(streamFormat), Status: rejected, Error: rejectionCode(rejected)})
 			h.rejectBody(w, r, rejected, rejectionCode(rejected), rejectionMessage(rejected), false)
 			return
 		}
@@ -113,6 +126,7 @@ func (h *Handler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 		// for the remaining body to decide connection reuse). Declaring
 		// Connection: close forces an immediate flush, mirroring the Node
 		// rejectOversizedWithStatus drain-then-destroy behavior.
+		h.logEntry(logstore.Entry{Time: time.Now(), Level: logstore.LevelError, Path: rawPath, Format: string(streamFormat), Status: rejected, Error: rejectionCode(rejected)})
 		h.rejectBody(w, r, rejected, rejectionCode(rejected), rejectionMessage(rejected), true)
 		return
 	}
@@ -120,12 +134,6 @@ func (h *Handler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 		return // client disconnected during upload
 	}
 
-
-	path := RewritePath(rawPath)
-	streamFormat := StreamAnthropic
-	if strings.HasPrefix(path, "/v1/chat/completions") {
-		streamFormat = StreamOpenAI
-	}
 	summary := SummarizeRequest(body, path, method)
 	h.Log.Debug(fmt.Sprintf("%s %s -> REQUEST %s", method, rawPath, summaryDebug(summary)))
 
@@ -137,10 +145,10 @@ func (h *Handler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 
 	// The proxy's spoof owns the Anthropic-* headers; clients supply only
 	// Authorization / x-api-key (nothing else passes through).
-	spoof := auth.GenericHeaders()
-	if strings.HasPrefix(path, "/v1/messages") {
-		spoof = auth.SpoofHeaders()
-	}
+	// Profile-aware: default is opencode (SPOOF_PROFILE). For /v1/messages
+	// (Anthropic) the full spoof set is sent, otherwise only the generic UA.
+	isAnthropic := strings.HasPrefix(path, "/v1/messages")
+	spoof := auth.HeadersForProfile(h.Cfg.NormalizedSpoofProfile(), isAnthropic)
 	upstreamHeaders := make(http.Header)
 	for k, v := range spoof {
 		upstreamHeaders.Set(k, v)
@@ -158,9 +166,9 @@ func (h *Handler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 
 	body = InjectPrompt(body, path, h.Cfg.InjectSystemPrompt)
 
-
 	if h.Breaker.IsOpen() {
 		h.Log.Info(fmt.Sprintf("%s %s -> REJECTED (circuit open)", method, rawPath))
+		h.logEntry(logstore.Entry{Time: time.Now(), Level: logstore.LevelError, Path: rawPath, Format: string(streamFormat), Status: http.StatusServiceUnavailable, Error: "circuit_open"})
 		h.respondJSON(w, http.StatusServiceUnavailable, errorBody("circuit_open", "Upstream circuit breaker open, retry later"))
 		return
 	}
@@ -171,6 +179,17 @@ func (h *Handler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 	h.doRequest(w, r, body, path, streamFormat, summary, upstreamHeaders, model)
 }
 
+// StreamFormatForPath selects the SSE terminal format for a proxied path:
+// StreamOpenAI for the OpenAI-style completion routes, StreamAnthropic for
+// everything else. /v1/responses/compact shares the /v1/responses prefix.
+func StreamFormatForPath(path string) StreamFormat {
+	if strings.HasPrefix(path, "/v1/chat/completions") ||
+		strings.HasPrefix(path, "/v1/completions") ||
+		strings.HasPrefix(path, "/v1/responses") {
+		return StreamOpenAI
+	}
+	return StreamAnthropic
+}
 
 func rejectionCode(status int) string {
 	if status == http.StatusRequestTimeout {
@@ -293,7 +312,6 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-
 // doRequest runs the retry loop (handler.mjs l.167-440). Each iteration either
 // produces a terminal client response and returns, or continues with the next
 // attempt.
@@ -316,7 +334,7 @@ func (h *Handler) doRequest(w http.ResponseWriter, r *http.Request, body []byte,
 		attemptHeaders := headers.Clone() // Cookie may be refreshed between attempts
 		resp, timedOut, err := h.roundTrip(reqCtx, method, upstreamURL, attemptHeaders, body, adaptiveTimeout)
 		if err != nil {
-			if h.handleTransportError(w, r, model, attempt, err, timedOut, reqCtx) {
+			if h.handleTransportError(w, r, model, attempt, err, timedOut, reqCtx, streamFormat) {
 				return // terminal error response written
 			}
 			continue // retried
@@ -330,7 +348,7 @@ func (h *Handler) doRequest(w http.ResponseWriter, r *http.Request, body []byte,
 
 		// WAF 403/405 on the first attempt → re-warmup and retry once.
 		if (status == http.StatusForbidden || status == http.StatusMethodNotAllowed) && attempt == 0 {
-			if h.handleWafResponse(w, r, resp, model, headers, reqCtx, status, respStart) {
+			if h.handleWafResponse(w, r, resp, model, headers, reqCtx, status, respStart, streamFormat) {
 				return // forwarded a non-WAF response (or gave up)
 			}
 			continue // WAF retried; next attempt
@@ -377,7 +395,7 @@ func (h *Handler) doRequest(w http.ResponseWriter, r *http.Request, body []byte,
 		}
 
 		if status != http.StatusOK {
-			h.forwardNon200(w, r, resp, model, status, filtered, respStart)
+			h.forwardNon200(w, r, resp, model, status, filtered, respStart, streamFormat)
 			return
 		}
 
@@ -388,7 +406,7 @@ func (h *Handler) doRequest(w http.ResponseWriter, r *http.Request, body []byte,
 		if isSSE {
 			h.streamSSE(w, r, resp, model, streamFormat, reqCtx)
 		} else {
-			h.copyBody(w, resp, model, respStart)
+			h.copyBody(w, r, resp, model, streamFormat, respStart)
 		}
 		return
 	}
@@ -437,7 +455,7 @@ func (h *Handler) roundTrip(ctx context.Context, method, url string, headers htt
 // and attempts remain, it sleeps the backoff and returns false so the caller
 // continues the loop; otherwise it writes the terminal 504/502 response and
 // returns true.
-func (h *Handler) handleTransportError(w http.ResponseWriter, r *http.Request, model string, attempt int, err error, timedOut bool, ctx context.Context) bool {
+func (h *Handler) handleTransportError(w http.ResponseWriter, r *http.Request, model string, attempt int, err error, timedOut bool, ctx context.Context, streamFormat StreamFormat) bool {
 	rawPath := r.URL.RequestURI()
 	method := r.Method
 	msg := transportMessage(err)
@@ -475,6 +493,7 @@ func (h *Handler) handleTransportError(w http.ResponseWriter, r *http.Request, m
 	}
 	// Node's handleError records the result without a durationMs (defaults 0).
 	h.Recorder.Result(model, models.ResultArgs{StatusCode: status, Error: msg})
+	h.logEntry(logstore.Entry{Time: time.Now(), Level: logstore.LevelError, Path: rawPath, Model: model, Format: string(streamFormat), Status: status, Error: msg})
 	h.respondJSON(w, status, errorBody(code, message))
 	return true
 }
@@ -512,7 +531,7 @@ func transportMessage(err error) string {
 // marks the model degraded on empty output, and either retries after warmup
 // (returning false so the caller continues the loop) or forwards the non-WAF
 // response as-is (returning true).
-func (h *Handler) handleWafResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, model string, headers http.Header, ctx context.Context, status int, respStart time.Time) bool {
+func (h *Handler) handleWafResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, model string, headers http.Header, ctx context.Context, status int, respStart time.Time, streamFormat StreamFormat) bool {
 	rawPath := r.URL.RequestURI()
 	method := r.Method
 	raw, readErr := io.ReadAll(resp.Body)
@@ -522,6 +541,7 @@ func (h *Handler) handleWafResponse(w http.ResponseWriter, r *http.Request, resp
 		h.Breaker.RecordFailure()
 		h.Log.Info(fmt.Sprintf("%s %s -> ERROR: %s (final)", method, rawPath, readErr))
 		h.Recorder.Result(model, models.ResultArgs{StatusCode: http.StatusBadGateway, Error: "upstream_response_error"})
+		h.logEntry(logstore.Entry{Time: time.Now(), Level: logstore.LevelError, Path: rawPath, Model: model, Format: string(streamFormat), Status: http.StatusBadGateway, Error: "upstream_response_error"})
 		h.respondJSON(w, http.StatusBadGateway, errorBody("proxy_error", readErr.Error()))
 		return true
 	}
@@ -534,10 +554,12 @@ func (h *Handler) handleWafResponse(w http.ResponseWriter, r *http.Request, resp
 		// Not a WAF block page: forward the response as-is.
 		h.Log.Info(fmt.Sprintf("%s %s <- %d (%db)", method, rawPath, status, len(raw)))
 		h.Log.Info(fmt.Sprintf("RESPONSE BODY: %s", RedactSensitive(Truncate(string(raw), 1000))))
+		dur := time.Since(respStart).Milliseconds()
 		h.Recorder.Result(model, models.ResultArgs{
-			StatusCode: status, DurationMs: time.Since(respStart).Milliseconds(),
+			StatusCode: status, DurationMs: dur,
 			Error: "http_" + strconv.Itoa(status), EmptyOutput: emptyOutput,
 		})
+		h.logEntry(logstore.Entry{Time: time.Now(), Level: logstore.LevelError, Path: rawPath, Model: model, Format: string(streamFormat), Status: status, DurationMs: dur, Error: "http_" + strconv.Itoa(status)})
 		// 4xx is "neither" for the circuit breaker (see the accounting comment
 		// in doRequest): a non-WAF 403/405 is a client-side rejection, not an
 		// upstream outage. Recording it as a failure would let an expired API
@@ -559,7 +581,7 @@ func (h *Handler) handleWafResponse(w http.ResponseWriter, r *http.Request, resp
 
 // forwardNon200 buffers a non-200 upstream body and forwards it to the client
 // with filtered headers (handler.mjs l.294-322).
-func (h *Handler) forwardNon200(w http.ResponseWriter, r *http.Request, resp *http.Response, model string, status int, filtered http.Header, respStart time.Time) {
+func (h *Handler) forwardNon200(w http.ResponseWriter, r *http.Request, resp *http.Response, model string, status int, filtered http.Header, respStart time.Time, streamFormat StreamFormat) {
 	rawPath := r.URL.RequestURI()
 	method := r.Method
 	raw, readErr := io.ReadAll(resp.Body)
@@ -571,6 +593,7 @@ func (h *Handler) forwardNon200(w http.ResponseWriter, r *http.Request, resp *ht
 		// interprets it as a successful but empty completion.
 		h.Log.Info(fmt.Sprintf("%s %s -> ERROR: %s (final)", method, rawPath, readErr))
 		h.Recorder.Result(model, models.ResultArgs{StatusCode: http.StatusBadGateway, Error: "upstream_response_error"})
+		h.logEntry(logstore.Entry{Time: time.Now(), Level: logstore.LevelError, Path: rawPath, Model: model, Format: string(streamFormat), Status: http.StatusBadGateway, Error: "upstream_response_error"})
 		h.respondJSON(w, http.StatusBadGateway, errorBody("upstream_response_error", readErr.Error()))
 		return
 	}
@@ -580,10 +603,16 @@ func (h *Handler) forwardNon200(w http.ResponseWriter, r *http.Request, resp *ht
 	}
 	h.Log.Info(fmt.Sprintf("%s %s <- %d (%db)", method, rawPath, status, len(raw)))
 	h.Log.Info(fmt.Sprintf("RESPONSE BODY: %s", RedactSensitive(Truncate(string(raw), 1000))))
+	dur := time.Since(respStart).Milliseconds()
 	h.Recorder.Result(model, models.ResultArgs{
-		StatusCode: status, DurationMs: time.Since(respStart).Milliseconds(),
+		StatusCode: status, DurationMs: dur,
 		Error: "http_" + strconv.Itoa(status), EmptyOutput: emptyOutput,
 	})
+	level, entryErr := logstore.LevelInfo, ""
+	if status >= 400 {
+		level, entryErr = logstore.LevelError, "http_"+strconv.Itoa(status)
+	}
+	h.logEntry(logstore.Entry{Time: time.Now(), Level: level, Path: rawPath, Model: model, Format: string(streamFormat), Status: status, DurationMs: dur, Error: entryErr})
 	h.writeFull(w, status, filtered, raw)
 }
 
@@ -609,6 +638,18 @@ func (h *Handler) streamSSE(w http.ResponseWriter, r *http.Request, resp *http.R
 		Error: res.Error, EmptyOutput: res.EmptyOutput,
 	})
 
+	level := logstore.LevelInfo
+	if res.Error != "" || res.StatusCode >= 400 {
+		level = logstore.LevelError
+	}
+	h.logEntry(logstore.Entry{
+		Time: time.Now(), Level: level, Path: rawPath, Model: model,
+		Format: string(streamFormat), Status: res.StatusCode, DurationMs: res.DurationMs,
+		TokensIn: res.TokensIn, TokensOut: res.TokensOut,
+		CacheRead: res.CacheRead, CacheWrite: res.CacheWrite,
+		Error: res.Error,
+	})
+
 	// Degrade the model on SSE-timeout / mid-span / empty output (mirror
 	// onDegrade in stream.mjs). "empty_sse" arrives via EmptyOutput.
 	switch res.Error {
@@ -626,7 +667,8 @@ func (h *Handler) streamSSE(w http.ResponseWriter, r *http.Request, resp *http.R
 }
 
 // copyBody copies a non-SSE 200 body to the client and records the result.
-func (h *Handler) copyBody(w http.ResponseWriter, resp *http.Response, model string, respStart time.Time) {
+func (h *Handler) copyBody(w http.ResponseWriter, r *http.Request, resp *http.Response, model string, streamFormat StreamFormat, respStart time.Time) {
+	rawPath := r.URL.RequestURI()
 	copyStart := time.Now()
 	// Write deadline: a stalled client that stops reading fills its TCP send
 	// buffer and io.Copy blocks indefinitely. The deadline ensures the copy
@@ -634,13 +676,46 @@ func (h *Handler) copyBody(w http.ResponseWriter, resp *http.Response, model str
 	if dl := h.Cfg.ResponseTimeout(); dl > 0 {
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(dl))
 	}
-	_, _ = io.Copy(w, resp.Body)
+	// Tee the body into a bounded capture so token usage can be parsed from
+	// the response; the client still receives every byte.
+	capture := &cappedBuffer{max: maxUsageCapture}
+	_, _ = io.Copy(w, io.TeeReader(resp.Body, capture))
 	_ = resp.Body.Close()
 	dur := time.Since(copyStart).Milliseconds()
+	usage := UsageFromBody(capture.buf.Bytes())
 	h.Recorder.Result(model, models.ResultArgs{StatusCode: http.StatusOK, DurationMs: dur})
+	h.logEntry(logstore.Entry{
+		Time: time.Now(), Level: logstore.LevelInfo, Path: rawPath, Model: model,
+		Format: string(streamFormat), Status: http.StatusOK, DurationMs: dur,
+		TokensIn: usage.Input, TokensOut: usage.Output,
+		CacheRead: usage.CacheRead, CacheWrite: usage.CacheWrite,
+	})
 	if dur >= h.Cfg.SlowResponse().Milliseconds() {
 		h.Health.MarkDegraded(model, fmt.Sprintf("slow_%dms", dur))
 	}
+}
+
+// maxUsageCapture caps how much of a non-SSE response body is buffered for
+// token parsing (1 MiB); usage blocks sit at the top of the JSON payload.
+const maxUsageCapture = 1 << 20
+
+// cappedBuffer captures writes into an internal buffer, silently dropping
+// bytes beyond max so a TeeReader never errors.
+type cappedBuffer struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	room := c.max - c.buf.Len()
+	if room > 0 {
+		if len(p) > room {
+			_, _ = c.buf.Write(p[:room])
+		} else {
+			_, _ = c.buf.Write(p)
+		}
+	}
+	return len(p), nil
 }
 
 func (h *Handler) writeHead(w http.ResponseWriter, status int, headers http.Header) {

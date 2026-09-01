@@ -80,12 +80,17 @@ type Options struct {
 // reports via onResult. StatusCode is the effective status (200 on clean end,
 // 502/504 on abnormal ends). Error carries the reason for non-200 results.
 // EmptyOutput reports whether an SSE stream produced no real data event.
+// TokensIn/Out and the cache fields are the token totals seen in the stream.
 type Result struct {
 	StatusCode  int
 	DurationMs  int64
 	Chunks      int
 	Error       string
 	EmptyOutput bool
+	TokensIn    int
+	TokensOut   int
+	CacheRead   int
+	CacheWrite  int
 }
 
 // frame is a unit of output handed to the single-writer OUTPUT goroutine.
@@ -166,6 +171,17 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 		}
 	}
 
+	classifier := NewFrameClassifier(nil, o.LogDebug)
+	// addTokens fills the token fields of a Result from the classifier; every
+	// terminal path runs after the classifier saw the final frames.
+	addTokens := func(res *Result) {
+		u := classifier.Usage()
+		res.TokensIn = u.Input
+		res.TokensOut = u.Output
+		res.CacheRead = u.CacheRead
+		res.CacheWrite = u.CacheWrite
+	}
+
 	go func() {
 		defer close(outDone)
 		rc := http.NewResponseController(w)
@@ -214,6 +230,8 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 					o.Log(fmt.Sprintf("SSE WRITE FAILED (client stalled or disconnected): %v", err))
 					_ = body.Close()
 					cancelStream()
+					// The reader may still be classifying, so token totals are not read
+					// here; the reader's own finish paths populate them race-free.
 					resultCh <- Result{StatusCode: http.StatusBadGateway, DurationMs: durMS(), Error: "client_write_failed"}
 					return
 				}
@@ -223,7 +241,6 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 		}
 	}()
 
-	classifier := NewFrameClassifier(nil, o.LogDebug)
 	thinkStripper := NewThinkStripper()
 	var openaiPending []byte
 	chunkCount := 0
@@ -272,7 +289,6 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 		return ready
 	}
 
-
 	// handleCleanEnd: upstream returned io.EOF (stream.mjs 'end' handler).
 	handleCleanEnd := func() {
 		classifier.Flush()
@@ -281,8 +297,9 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 			// Withheld bytes were never forwarded: silent 200 would be
 			// truncation. Surface as a 502 with an error frame (l.368-375).
 			o.Log(fmt.Sprintf("UPSTREAM ENDED MID-SPAN (unterminated thinking tag, %d chunks)", chunkCount))
-			finish(Result{StatusCode: 502, DurationMs: durMS(), Chunks: chunkCount, Error: "upstream_ended_mid_frame"},
-				"upstream_ended_mid_frame", classifier.SawMessageStop())
+			res := Result{StatusCode: 502, DurationMs: durMS(), Chunks: chunkCount, Error: "upstream_ended_mid_frame"}
+			addTokens(&res)
+			finish(res, "upstream_ended_mid_frame", classifier.SawMessageStop())
 			return
 		}
 		// Forward a legitimate trailing tag prefix and any OpenAI tail frame
@@ -307,8 +324,9 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 			o.Log(fmt.Sprintf("EMPTY SSE STREAM (%d chunks)", chunkCount))
 		}
 		o.Log(fmt.Sprintf("200 (stream complete, %dms, %d chunks)", durMS(), chunkCount))
-		finish(Result{StatusCode: 200, DurationMs: durMS(), Chunks: chunkCount, EmptyOutput: empty},
-			"", classifier.SawMessageStop())
+		res := Result{StatusCode: 200, DurationMs: durMS(), Chunks: chunkCount, EmptyOutput: empty}
+		addTokens(&res)
+		finish(res, "", classifier.SawMessageStop())
 	}
 
 	// handleStreamError: non-EOF read error (stream.mjs 'error' handler).
@@ -316,8 +334,9 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 		classifier.Flush()
 		openaiPending = nil
 		o.Log(fmt.Sprintf("UPSTREAM STREAM ERROR: %s", err))
-		finish(Result{StatusCode: 502, DurationMs: durMS(), Chunks: chunkCount, Error: err.Error()},
-			"upstream_stream_error", classifier.SawMessageStop())
+		res := Result{StatusCode: 502, DurationMs: durMS(), Chunks: chunkCount, Error: err.Error()}
+		addTokens(&res)
+		finish(res, "upstream_stream_error", classifier.SawMessageStop())
 	}
 
 	// handleUpstreamClosed: body closed / truncated before a clean end
@@ -326,8 +345,9 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 		classifier.Flush()
 		openaiPending = nil
 		o.Log(fmt.Sprintf("UPSTREAM CLOSED (connection terminated prematurely, %dms, %d chunks)", durMS(), chunkCount))
-		finish(Result{StatusCode: 502, DurationMs: durMS(), Chunks: chunkCount, Error: "upstream_closed"},
-			"upstream_closed", classifier.SawMessageStop())
+		res := Result{StatusCode: 502, DurationMs: durMS(), Chunks: chunkCount, Error: "upstream_closed"}
+		addTokens(&res)
+		finish(res, "upstream_closed", classifier.SawMessageStop())
 	}
 
 	// handleCtxCancel: stream context cancelled (client gone or idle timeout).
@@ -335,12 +355,14 @@ func PumpSSE(ctx context.Context, w http.ResponseWriter, upBody io.ReadCloser, o
 		_ = body.Close()
 		if idleTriggered.Load() {
 			o.Log(fmt.Sprintf("SSE IDLE TIMEOUT (%gs no events)", o.IdleTimeout.Seconds()))
-			finish(Result{StatusCode: 504, DurationMs: durMS(), Chunks: chunkCount, Error: "sse_idle_timeout"},
-				"sse_idle_timeout", classifier.SawMessageStop())
+			res := Result{StatusCode: 504, DurationMs: durMS(), Chunks: chunkCount, Error: "sse_idle_timeout"}
+			addTokens(&res)
+			finish(res, "sse_idle_timeout", classifier.SawMessageStop())
 			return
 		}
-		finish(Result{StatusCode: 502, DurationMs: durMS(), Chunks: chunkCount, Error: "client_disconnected"},
-			"client_disconnected", classifier.SawMessageStop())
+		res := Result{StatusCode: 502, DurationMs: durMS(), Chunks: chunkCount, Error: "client_disconnected"}
+		addTokens(&res)
+		finish(res, "client_disconnected", classifier.SawMessageStop())
 	}
 
 	go func() {

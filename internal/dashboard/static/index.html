@@ -1,0 +1,877 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0d1117">
+<title>AgentRouter Proxy</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%2358a6ff'/></svg>">
+<style>
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --panel2: #0a0e14;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --accent: #58a6ff;
+  --green: #3fb950;
+  --red: #f85149;
+  --yellow: #d29922;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+
+/* Top navigation */
+.tabs {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  background: rgba(13, 17, 23, 0.94);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  white-space: nowrap;
+  -webkit-overflow-scrolling: touch;
+}
+.tab {
+  flex: 0 0 auto;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 7px 14px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.tab:hover { color: var(--text); }
+.tab.active {
+  color: var(--text);
+  background: var(--panel);
+  border-color: var(--border);
+}
+
+/* Generic layout */
+.row { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+.row h1 { flex: 1; }
+h1 { font-size: 20px; margin: 0; }
+h2 { font-size: 17px; margin: 0 0 8px; }
+.muted { color: var(--muted); }
+.mono { font-family: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace; font-size: 12px; }
+.num { text-align: right; }
+.nowrap { white-space: nowrap; }
+.msg { min-height: 18px; margin-top: 10px; font-size: 13px; }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+.card .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.card .v { font-size: 16px; word-break: break-word; }
+.card .v.ok { color: var(--green); }
+.card .v.bad { color: var(--red); }
+.card .v.warn { color: var(--yellow); }
+
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 14px; }
+.cards .card { margin-bottom: 0; }
+
+/* Tables */
+.table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+table { width: 100%; border-collapse: collapse; min-width: 640px; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+tbody tr:last-child td { border-bottom: none; }
+tr.err { background: rgba(248, 81, 73, 0.07); }
+.lvl { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; text-transform: uppercase; }
+.lvl.info { color: var(--accent); border: 1px solid var(--accent); }
+.lvl.error { color: var(--red); border: 1px solid var(--red); }
+.err-text { color: var(--red); }
+
+/* Controls */
+button {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 14px;
+  cursor: pointer;
+  font-size: 14px;
+}
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover { filter: brightness(1.1); }
+button:disabled { opacity: 0.5; cursor: default; }
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+input[type="text"], input[type="password"], select {
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: inherit;
+  width: 100%;
+}
+select { width: auto; min-width: 240px; }
+.radio { display: flex; align-items: center; gap: 8px; margin: 8px 0; cursor: pointer; }
+.radio input { width: auto; }
+.seg { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.seg button { border: none; border-radius: 0; background: transparent; }
+.seg button.active { background: var(--accent); color: #fff; }
+
+/* Client generator */
+.gen-layout { display: grid; grid-template-columns: 300px 1fr; gap: 12px; align-items: start; }
+pre {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  overflow: auto;
+  margin: 10px 0 0;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  max-height: 560px;
+  white-space: pre;
+}
+
+/* Token prompt */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 16px;
+}
+.overlay.show { display: flex; }
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.modal p { color: var(--muted); margin: 0 0 14px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+@media (max-width: 960px) {
+  .cards { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 720px) {
+  .cards { grid-template-columns: 1fr; }
+  .gen-layout { grid-template-columns: 1fr; }
+  main { padding: 12px; }
+  h1 { font-size: 18px; }
+  select { min-width: 100%; }
+  .table-wrap { margin: 0 -4px; }
+}
+</style>
+</head>
+<body>
+
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="overview">Overview</button>
+  <button class="tab" data-tab="models">Models</button>
+  <button class="tab" data-tab="generator">Client Generator</button>
+  <button class="tab" data-tab="logs">Logs</button>
+  <button class="tab" data-tab="checkin">Check-in</button>
+  <button class="tab" data-tab="settings">Settings</button>
+</nav>
+
+<main>
+
+  <section id="tab-overview" class="tabpage">
+    <div class="row">
+      <h1>Overview</h1>
+      <button id="ov-refresh">Refresh</button>
+    </div>
+    <div class="cards">
+      <div class="card"><div class="k">Upstream</div><div class="v mono" id="ov-upstream">-</div></div>
+      <div class="card"><div class="k">Mode</div><div class="v" id="ov-mode">-</div></div>
+      <div class="card"><div class="k">WAF Cookie</div><div class="v" id="ov-waf">-</div></div>
+      <div class="card"><div class="k">Circuit</div><div class="v" id="ov-circuit">-</div></div>
+      <div class="card"><div class="k">Active Streams</div><div class="v" id="ov-active">-</div></div>
+      <div class="card"><div class="k">Models</div><div class="v" id="ov-models">-</div></div>
+    </div>
+    <div class="msg muted" id="msg-overview"></div>
+  </section>
+
+  <section id="tab-models" class="tabpage" hidden>
+    <div class="row">
+      <h1>Models</h1>
+      <button id="md-refresh">Refresh</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>ID</th><th>Object</th><th>Created</th><th>Owned by</th></tr>
+        </thead>
+        <tbody id="md-body"></tbody>
+      </table>
+    </div>
+    <div class="msg muted" id="msg-models"></div>
+  </section>
+
+  <section id="tab-generator" class="tabpage" hidden>
+    <div class="row"><h1>Client Generator</h1></div>
+    <p class="muted">Generates client config templates that point at this proxy. Replace &lt;AGENTROUTER_API_KEY&gt; with your AgentRouter API key. <span id="gen-auth-note"></span></p>
+    <div class="gen-layout">
+      <div class="card">
+        <div class="k">Exposure mode</div>
+        <label class="radio"><input type="radio" name="gen-mode" value="auto" checked> auto <span class="muted">(auto-detected format)</span></label>
+        <label class="radio"><input type="radio" name="gen-mode" value="pooled"> pooled <span class="muted">(single endpoint, all models)</span></label>
+        <label class="radio"><input type="radio" name="gen-mode" value="bridge"> bridge <span class="muted">(one config per model)</span></label>
+        <div class="k">Client format</div>
+        <select id="gen-format">
+          <option value="openai-curl">OpenAI (curl)</option>
+          <option value="openai-py">OpenAI (Python)</option>
+          <option value="openai-node">OpenAI (Node)</option>
+          <option value="anthropic-env">Anthropic (Claude Code env)</option>
+          <option value="9router-json">9Router provider JSON</option>
+          <option value="opencode-json">opencode JSON</option>
+          <option value="codex-toml">Codex TOML</option>
+        </select>
+        <div style="margin-top:12px"><button id="gen-run" class="primary">Generate</button></div>
+      </div>
+      <div class="card">
+        <div class="row" style="margin-bottom:0">
+          <div class="k">Output</div>
+          <button id="gen-copy">Copy</button>
+        </div>
+        <pre id="gen-output">Pick a format and hit Generate.</pre>
+      </div>
+    </div>
+    <div class="msg muted" id="msg-generator"></div>
+  </section>
+
+  <section id="tab-logs" class="tabpage" hidden>
+    <div class="row">
+      <h1>Logs</h1>
+      <div class="seg" id="logs-filter">
+        <button data-level="all" class="active">All</button>
+        <button data-level="error">Errors</button>
+      </div>
+      <button id="logs-pause">Pause</button>
+      <span class="muted" id="logs-updated"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th><th>Level</th><th>Path</th><th>Model</th><th>Format</th>
+            <th>Status</th><th class="num">Tokens in</th><th class="num">Tokens out</th>
+            <th class="num">Duration</th><th>Error</th>
+          </tr>
+        </thead>
+        <tbody id="logs-body"></tbody>
+      </table>
+    </div>
+    <div class="msg muted" id="msg-logs"></div>
+  </section>
+
+  <section id="tab-checkin" class="tabpage" hidden>
+    <div class="row">
+      <h1>Check-in</h1>
+      <button id="ck-refresh">Refresh</button>
+      <button id="ck-run" class="primary">Run Now</button>
+    </div>
+    <div class="cards">
+      <div class="card"><div class="k">Configured</div><div class="v" id="ck-configured">-</div></div>
+      <div class="card"><div class="k">Status</div><div class="v" id="ck-status">-</div></div>
+      <div class="card"><div class="k">Schedule</div><div class="v" id="ck-schedule">-</div></div>
+      <div class="card"><div class="k">Window</div><div class="v mono" id="ck-window">-</div></div>
+      <div class="card"><div class="k">Next run</div><div class="v" id="ck-next">-</div></div>
+      <div class="card"><div class="k">Command</div><div class="v mono" id="ck-cmd">-</div></div>
+    </div>
+    <div class="card">
+      <div class="row" style="margin-bottom:6px">
+        <div class="k">Last run</div>
+        <div id="ck-lastmeta" class="muted">No run yet</div>
+      </div>
+      <pre id="ck-output"></pre>
+    </div>
+    <div class="msg muted" id="msg-checkin"></div>
+  </section>
+
+  <section id="tab-settings" class="tabpage" hidden>
+    <div class="row"><h1>Settings</h1></div>
+    <div class="card">
+      <div class="k">Exposure mode</div>
+      <label class="radio"><input type="radio" name="set-mode" value="auto"> auto <span class="muted">(request format auto-detection)</span></label>
+      <label class="radio"><input type="radio" name="set-mode" value="pooled"> pooled <span class="muted">(single endpoint, all models)</span></label>
+      <label class="radio"><input type="radio" name="set-mode" value="bridge"> bridge <span class="muted">(pin model per request)</span></label>
+      <div style="margin-top:10px"><button id="set-mode-save" class="primary">Save mode</button></div>
+    </div>
+    <div class="card">
+      <div class="k">Proxy token</div>
+      <p class="muted">Sent as X-Proxy-Token on every request when set. Stored locally in your browser (localStorage key proxy_token). Leave empty and save to clear.</p>
+      <input type="password" id="set-token" placeholder="Proxy auth token" autocomplete="off">
+      <div style="margin-top:10px">
+        <button id="set-token-save">Save token</button>
+        <button id="set-token-clear">Clear</button>
+      </div>
+    </div>
+    <div class="msg muted" id="msg-settings"></div>
+  </section>
+
+</main>
+
+<div class="overlay" id="token-overlay">
+  <div class="modal">
+    <h2>Proxy token required</h2>
+    <p>The server returned 401. Enter the proxy auth token (PROXY_AUTH_TOKEN) to continue. It is stored locally in your browser.</p>
+    <input type="password" id="token-input" placeholder="Proxy auth token" autocomplete="off">
+    <div class="modal-actions">
+      <button id="token-cancel">Cancel</button>
+      <button id="token-save" class="primary">Save token</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+(function () {
+
+  var KEY = "<AGENTROUTER_API_KEY>";
+  var HINT = "Request format auto-detection is active; the same endpoint serves OpenAI and Anthropic clients.";
+  var cfg = null;
+  var currentTab = "overview";
+  var logsFilter = "all";
+  var logsPaused = false;
+
+  function $(sel) { return document.querySelector(sel); }
+  function $$(sel) { return Array.prototype.slice.call(document.querySelectorAll(sel)); }
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function getToken() { return localStorage.getItem("proxy_token") || ""; }
+  function setToken(t) {
+    if (t) { localStorage.setItem("proxy_token", t); }
+    else { localStorage.removeItem("proxy_token"); }
+  }
+  function setMsg(tab, text) {
+    var el = document.getElementById("msg-" + tab);
+    if (el) { el.textContent = text; }
+  }
+  function fmtTime(iso) {
+    if (!iso) { return "-"; }
+    var d = new Date(iso);
+    return isNaN(d.getTime()) ? esc(iso) : d.toLocaleString();
+  }
+  function fmtDate(unixSecs) {
+    if (!unixSecs) { return "-"; }
+    var d = new Date(unixSecs * 1000);
+    return isNaN(d.getTime()) ? String(unixSecs) : d.toLocaleString();
+  }
+  function radioValue(name) {
+    var el = document.querySelector('input[name="' + name + '"]:checked');
+    return el ? el.value : "";
+  }
+  function setRadio(name, value) {
+    $$('input[name="' + name + '"]').forEach(function (r) { r.checked = (r.value === value); });
+  }
+
+  // ---- API wrapper: token header, 401 prompt ----
+  async function api(path, opts) {
+    opts = opts || {};
+    var headers = Object.assign({}, opts.headers || {});
+    var t = getToken();
+    if (t) { headers["X-Proxy-Token"] = t; }
+    var res = await fetch(path, Object.assign({}, opts, { headers: headers }));
+    if (res.status === 401) {
+      showTokenPrompt();
+      var err = new Error("Unauthorized");
+      err.unauthorized = true;
+      throw err;
+    }
+    return res;
+  }
+  async function apiJSON(path, opts) {
+    var res = await api(path, opts);
+    var ct = res.headers.get("content-type") || "";
+    if (ct.indexOf("application/json") !== -1) {
+      return res.json().catch(function () { return null; });
+    }
+    return null;
+  }
+
+  // ---- Token prompt ----
+  function showTokenPrompt() {
+    var ov = $("#token-overlay");
+    if (ov.classList.contains("show")) { return; }
+    $("#token-input").value = getToken();
+    ov.classList.add("show");
+    setTimeout(function () { $("#token-input").focus(); }, 50);
+  }
+  function hideTokenPrompt() { $("#token-overlay").classList.remove("show"); }
+  function saveTokenFromModal() {
+    setToken($("#token-input").value.trim());
+    hideTokenPrompt();
+    if (currentTab === "logs") { loadLogs(); }
+    else { showTab(currentTab); }
+  }
+
+  // ---- Overview ----
+  async function loadOverview() {
+    try {
+      var results = await Promise.all([
+        apiJSON("/api/status")
+      ]);
+      setMsg("overview", "");
+      var st = results[0];
+      if (!st) { return; }
+      $("#ov-upstream").textContent = st.upstream || "-";
+      $("#ov-mode").textContent = st.mode || "-";
+      $("#ov-waf").textContent = st.wafCookie ? "Present" : "Missing";
+      $("#ov-waf").className = "v " + (st.wafCookie ? "ok" : "bad");
+      $("#ov-circuit").textContent = st.circuitOpen ? "Open" : "Closed";
+      $("#ov-circuit").className = "v " + (st.circuitOpen ? "bad" : "ok");
+      $("#ov-active").textContent = String(st.activeStreams);
+      $("#ov-models").textContent = st.availableModels + " / " + st.staticModels + " (" + (st.modelSource || "static") + ")";
+    } catch (e) {
+      if (!e.unauthorized) { setMsg("overview", "Failed to load: " + e.message); }
+    }
+  }
+
+  // ---- Models ----
+  async function loadModels() {
+    try {
+      var data = await apiJSON("/api/config");
+      setMsg("models", "");
+      if (!data) { return; }
+      var models = data.models || [];
+      if (!models.length) {
+        $("#md-body").innerHTML = '<tr><td colspan="4" class="muted">No models configured.</td></tr>';
+        return;
+      }
+      $("#md-body").innerHTML = models.map(function (m) {
+        return "<tr><td class=\"mono\">" + esc(m.id) + "</td><td>" + esc(m.object) +
+          "</td><td>" + fmtDate(m.created) + "</td><td>" + esc(m.owned_by) + "</td></tr>";
+      }).join("");
+    } catch (e) {
+      if (!e.unauthorized) { setMsg("models", "Failed to load: " + e.message); }
+    }
+  }
+
+  // ---- Client generator ----
+  function baseUrl() { return String(cfg.baseUrl || location.origin).replace(/\/+$/, ""); }
+  function apiBase() { return baseUrl() + "/v1"; }
+  function allModels() { return (cfg && cfg.models || []).map(function (m) { return m.id; }); }
+  function firstModel() { var m = allModels(); return m.length ? m[0] : "claude-opus-5"; }
+  function blockSep() { return "\n\n"; }
+
+  function gCurlBlock(modelId) {
+    return [
+      "curl " + apiBase() + "/chat/completions \\",
+      '  -H "Content-Type: application/json" \\',
+      '  -H "Authorization: Bearer ' + KEY + '" \\',
+      "  -d '{",
+      '    "model": "' + modelId + '",',
+      '    "messages": [{"role": "user", "content": "Hello"}]',
+      "  }'"
+    ].join("\n");
+  }
+  function gPyBlock(modelId) {
+    return [
+      "from openai import OpenAI",
+      "",
+      "client = OpenAI(",
+      '    base_url="' + apiBase() + '",',
+      '    api_key="' + KEY + '",',
+      ")",
+      "",
+      "resp = client.chat.completions.create(",
+      '    model="' + modelId + '",',
+      '    messages=[{"role": "user", "content": "Hello"}],',
+      ")",
+      "print(resp.choices[0].message.content)"
+    ].join("\n");
+  }
+  function gNodeBlock(modelId) {
+    return [
+      'import OpenAI from "openai";',
+      "",
+      "const client = new OpenAI({",
+      '  baseURL: "' + apiBase() + '",',
+      '  apiKey: "' + KEY + '",',
+      "});",
+      "",
+      "const resp = await client.chat.completions.create({",
+      '  model: "' + modelId + '",',
+      '  messages: [{ role: "user", content: "Hello" }],',
+      "});",
+      "console.log(resp.choices[0].message.content);"
+    ].join("\n");
+  }
+  function gAnthropicBlock(modelId, pinModel) {
+    var lines = [
+      'export ANTHROPIC_BASE_URL="' + baseUrl() + '"',
+      'export ANTHROPIC_AUTH_TOKEN="' + KEY + '"'
+    ];
+    if (pinModel) {
+      lines.push('export ANTHROPIC_MODEL="' + modelId + '"');
+    } else {
+      lines.push('# Optional: pin a model, e.g. export ANTHROPIC_MODEL="' + firstModel() + '"');
+    }
+    lines.push("claude");
+    return lines.join("\n");
+  }
+  function opencodeProvider(modelIds) {
+    var models = {};
+    modelIds.forEach(function (id) { models[id] = { name: id }; });
+    return {
+      npm: "@ai-sdk/openai-compatible",
+      name: "AgentRouter",
+      options: { baseURL: apiBase(), apiKey: KEY },
+      models: models
+    };
+  }
+
+  function gOpenAICurl(mode) {
+    var head = [
+      "# AgentRouter OpenAI-compatible endpoint (curl)",
+      "# Replace " + KEY + " with your AgentRouter API key."
+    ];
+    if (mode === "auto") { head.push("# " + HINT); }
+    if (mode === "bridge") {
+      return head.concat(allModels().map(function (m) {
+        return "# ===== Model: " + m + " =====\n" + gCurlBlock(m);
+      })).join("\n\n");
+    }
+    head.push("# Use any model from the list in the request body.");
+    return head.concat([gCurlBlock(firstModel())]).join("\n\n");
+  }
+  function gPython(mode) {
+    var head = ["# AgentRouter OpenAI-compatible endpoint (Python)", "# Install: pip install openai"];
+    if (mode === "auto") { head.push("# " + HINT); }
+    if (mode === "bridge") {
+      return head.concat(allModels().map(function (m) {
+        return "# ===== Model: " + m + " =====\n" + gPyBlock(m);
+      })).join("\n\n");
+    }
+    return head.concat([gPyBlock(firstModel())]).join("\n\n");
+  }
+  function gNode(mode) {
+    var head = ["// AgentRouter OpenAI-compatible endpoint (Node)", "// Install: npm install openai"];
+    if (mode === "auto") { head.push("// " + HINT); }
+    if (mode === "bridge") {
+      return head.concat(allModels().map(function (m) {
+        return "// ===== Model: " + m + " =====\n" + gNodeBlock(m);
+      })).join("\n\n");
+    }
+    return head.concat([gNodeBlock(firstModel())]).join("\n\n");
+  }
+  function gAnthropic(mode) {
+    var head = ["# AgentRouter Anthropic-format endpoint for Claude Code"];
+    if (mode === "auto") { head.push("# " + HINT); }
+    if (mode === "bridge") {
+      return head.concat(allModels().map(function (m) {
+        return "# ===== Model: " + m + " =====\n" + gAnthropicBlock(m, true);
+      })).join("\n\n");
+    }
+    return head.concat([gAnthropicBlock(firstModel(), false)]).join("\n\n");
+  }
+  function gNineRouter(mode) {
+    var providers;
+    if (mode === "bridge") {
+      providers = allModels().map(function (m) {
+        return {
+          id: "agentrouter-" + m,
+          name: "AgentRouter " + m,
+          base_url: apiBase(),
+          api_key: KEY,
+          models: [m]
+        };
+      });
+    } else {
+      providers = [{
+        id: "agentrouter",
+        name: "AgentRouter",
+        base_url: apiBase(),
+        api_key: KEY,
+        models: allModels()
+      }];
+    }
+    return JSON.stringify({ providers: providers }, null, 2);
+  }
+  function gOpenCode(mode) {
+    var provider = {};
+    if (mode === "bridge") {
+      allModels().forEach(function (m) { provider["agentrouter-" + m] = opencodeProvider([m]); });
+    } else {
+      provider.agentrouter = opencodeProvider(allModels());
+    }
+    return JSON.stringify({ $schema: "https://opencode.ai/config.json", provider: provider }, null, 2);
+  }
+  function gCodex(mode) {
+    var providerHeader = [
+      'name = "AgentRouter"',
+      'base_url = "' + apiBase() + '"',
+      'env_key = "AGENTROUTER_API_KEY"',
+      'wire_api = "chat"'
+    ].join("\n");
+    if (mode === "bridge") {
+      return allModels().map(function (m) {
+        return "# ===== Model: " + m + " =====\n" +
+          'model = "' + m + '"\n' +
+          'model_provider = "agentrouter"\n\n' +
+          "[model_providers.agentrouter]\n" + providerHeader;
+      }).join("\n\n");
+    }
+    var lines = [
+      "# AgentRouter provider for Codex",
+      "# Pick a model at runtime with /model, or uncomment to pin one:",
+      '# model = "' + firstModel() + '"',
+      'model_provider = "agentrouter"',
+      "",
+      "[model_providers.agentrouter]",
+      providerHeader
+    ];
+    if (mode === "auto") { lines.splice(1, 0, "# " + HINT); }
+    return lines.join("\n");
+  }
+
+  function generate() {
+    if (!cfg) { $("#gen-output").textContent = "Config not loaded yet. Refresh the tab."; return; }
+    var mode = radioValue("gen-mode") || "auto";
+    var format = $("#gen-format").value;
+    var out = "";
+    switch (format) {
+      case "openai-curl": out = gOpenAICurl(mode); break;
+      case "openai-py": out = gPython(mode); break;
+      case "openai-node": out = gNode(mode); break;
+      case "anthropic-env": out = gAnthropic(mode); break;
+      case "9router-json": out = gNineRouter(mode); break;
+      case "opencode-json": out = gOpenCode(mode); break;
+      case "codex-toml": out = gCodex(mode); break;
+      default: out = "";
+    }
+    $("#gen-output").textContent = out;
+  }
+  async function loadGenerator() {
+    try {
+      cfg = await apiJSON("/api/config");
+      setMsg("generator", "");
+    } catch (e) {
+      if (!e.unauthorized) { setMsg("generator", "Failed to load: " + e.message); }
+    }
+    $("#gen-auth-note").textContent = (cfg && cfg.proxyAuth)
+      ? "Proxy auth is enabled: also send the proxy token as X-Proxy-Token or a Bearer header."
+      : "Proxy auth is off; any key value works.";
+    if (cfg) { generate(); }
+  }
+  async function copyOutput() {
+    var text = $("#gen-output").textContent;
+    var btn = $("#gen-copy");
+    var ok = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        ok = true;
+      }
+    } catch (e) { /* fall through to execCommand */ }
+    if (!ok) {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+    }
+    btn.textContent = ok ? "Copied" : "Copy failed";
+    setTimeout(function () { btn.textContent = "Copy"; }, 1500);
+  }
+
+  // ---- Logs ----
+  function logRow(e) {
+    var isErr = e.level === "error" || (typeof e.status === "number" && e.status >= 400);
+    return "<tr class=\"" + (isErr ? "err" : "") + "\">" +
+      '<td class="nowrap">' + fmtTime(e.time) + "</td>" +
+      '<td><span class="lvl ' + (isErr ? "error" : "info") + '">' + esc(e.level || "") + "</span></td>" +
+      '<td class="mono">' + esc(e.path) + "</td>" +
+      '<td class="mono">' + esc(e.model) + "</td>" +
+      "<td>" + esc(e.format || "-") + "</td>" +
+      "<td>" + (e.status || "-") + "</td>" +
+      '<td class="num">' + (e.tokensIn || 0) + "</td>" +
+      '<td class="num">' + (e.tokensOut || 0) + "</td>" +
+      '<td class="num">' + (e.durationMs ? e.durationMs + " ms" : "-") + "</td>" +
+      '<td class="mono err-text">' + esc(e.error || "") + "</td>" +
+      "</tr>";
+  }
+  async function loadLogs() {
+    try {
+      var data = await apiJSON("/api/logs?level=" + (logsFilter === "error" ? "error" : "all") + "&limit=200");
+      setMsg("logs", "");
+      var entries = (data && data.entries) ? data.entries : [];
+      if (!entries.length) {
+        $("#logs-body").innerHTML = '<tr><td colspan="10" class="muted">No entries.</td></tr>';
+      } else {
+        $("#logs-body").innerHTML = entries.map(logRow).join("");
+      }
+      $("#logs-updated").textContent = "Updated " + new Date().toLocaleTimeString();
+    } catch (e) {
+      if (!e.unauthorized) { setMsg("logs", "Failed to load: " + e.message); }
+    }
+  }
+  function setLogsFilter(level) {
+    logsFilter = level;
+    $$("#logs-filter button").forEach(function (b) { b.classList.toggle("active", b.dataset.level === level); });
+    loadLogs();
+  }
+  function toggleLogsPause() {
+    logsPaused = !logsPaused;
+    $("#logs-pause").textContent = logsPaused ? "Resume" : "Pause";
+  }
+
+  // ---- Check-in ----
+  async function loadCheckin() {
+    try {
+      var st = await apiJSON("/api/checkin/status");
+      setMsg("checkin", "");
+      if (!st) { return; }
+      $("#ck-configured").textContent = st.configured ? "Yes" : "No";
+      $("#ck-status").textContent = st.running ? "Running" : "Idle";
+      $("#ck-status").className = "v " + (st.running ? "warn" : "ok");
+      $("#ck-schedule").textContent = st.scheduleEnabled ? "Enabled" : "Disabled";
+      $("#ck-window").textContent = (st.windowStart && st.windowEnd) ? st.windowStart + " - " + st.windowEnd : "-";
+      $("#ck-next").textContent = fmtTime(st.nextRun);
+      $("#ck-cmd").textContent = st.cmd || "-";
+      $("#ck-run").disabled = !!st.running;
+      var last = st.lastRun;
+      if (last) {
+        $("#ck-lastmeta").innerHTML = "Started " + fmtTime(last.started) + " | Finished " + fmtTime(last.finished) +
+          " | Exit code " + last.exitCode + " | " + (last.ok ? '<span class="ok">OK</span>' : '<span class="bad">Failed</span>');
+        $("#ck-output").textContent = last.output || "(no output)";
+      } else {
+        $("#ck-lastmeta").textContent = "No run yet";
+        $("#ck-output").textContent = "";
+      }
+    } catch (e) {
+      if (!e.unauthorized) { setMsg("checkin", "Failed to load: " + e.message); }
+    }
+  }
+  async function runCheckin() {
+    var btn = $("#ck-run");
+    btn.disabled = true;
+    try {
+      var res = await api("/api/checkin/run", { method: "POST" });
+      if (res.status === 200) {
+        setMsg("checkin", "Check-in started.");
+      } else {
+        var j = await res.json().catch(function () { return null; });
+        setMsg("checkin", "Error: " + ((j && j.error && j.error.message) || res.status));
+      }
+      setTimeout(loadCheckin, 800);
+    } catch (e) {
+      if (!e.unauthorized) { setMsg("checkin", "Failed to start: " + e.message); }
+      btn.disabled = false;
+    }
+  }
+
+  // ---- Settings ----
+  async function loadSettings() {
+    try {
+      var data = await apiJSON("/api/config");
+      setMsg("settings", "");
+      if (data) { setRadio("set-mode", data.mode || "auto"); }
+      $("#set-token").value = getToken();
+    } catch (e) {
+      if (!e.unauthorized) { setMsg("settings", "Failed to load: " + e.message); }
+    }
+  }
+  async function saveMode() {
+    var mode = radioValue("set-mode");
+    if (!mode) { return; }
+    try {
+      var res = await api("/api/mode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: mode })
+      });
+      if (res.status === 200) {
+        setMsg("settings", "Mode saved: " + mode + ".");
+      } else {
+        var j = await res.json().catch(function () { return null; });
+        setMsg("settings", "Error: " + ((j && j.error && j.error.message) || res.status));
+      }
+    } catch (e) {
+      if (!e.unauthorized) { setMsg("settings", "Failed to save mode: " + e.message); }
+    }
+  }
+  function saveToken() {
+    var v = $("#set-token").value.trim();
+    setToken(v);
+    setMsg("settings", v ? "Token saved." : "Token cleared.");
+  }
+  function clearToken() {
+    $("#set-token").value = "";
+    setToken("");
+    setMsg("settings", "Token cleared.");
+  }
+
+  // ---- Tab switching ----
+  function showTab(name) {
+    currentTab = name;
+    $$(".tab").forEach(function (b) { b.classList.toggle("active", b.dataset.tab === name); });
+    $$(".tabpage").forEach(function (p) { p.hidden = (p.id !== "tab-" + name); });
+    if (name === "overview") { loadOverview(); }
+    else if (name === "models") { loadModels(); }
+    else if (name === "generator") { loadGenerator(); }
+    else if (name === "logs") { loadLogs(); }
+    else if (name === "checkin") { loadCheckin(); }
+    else if (name === "settings") { loadSettings(); }
+  }
+
+  function init() {
+    $$(".tab").forEach(function (b) { b.addEventListener("click", function () { showTab(b.dataset.tab); }); });
+    $("#ov-refresh").addEventListener("click", loadOverview);
+    $("#md-refresh").addEventListener("click", loadModels);
+    $("#gen-run").addEventListener("click", generate);
+    $("#gen-copy").addEventListener("click", copyOutput);
+    $$("#gen-mode, #gen-format").forEach(function (el) { el.addEventListener("change", generate); });
+    $$("#logs-filter button").forEach(function (b) { b.addEventListener("click", function () { setLogsFilter(b.dataset.level); }); });
+    $("#logs-pause").addEventListener("click", toggleLogsPause);
+    $("#ck-refresh").addEventListener("click", loadCheckin);
+    $("#ck-run").addEventListener("click", runCheckin);
+    $("#set-mode-save").addEventListener("click", saveMode);
+    $("#set-token-save").addEventListener("click", saveToken);
+    $("#set-token-clear").addEventListener("click", clearToken);
+    $("#token-save").addEventListener("click", saveTokenFromModal);
+    $("#token-cancel").addEventListener("click", hideTokenPrompt);
+    $("#token-input").addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { saveTokenFromModal(); }
+    });
+    showTab("overview");
+    setInterval(function () {
+      if (currentTab === "logs" && !logsPaused) { loadLogs(); }
+    }, 3000);
+  }
+
+  document.addEventListener("DOMContentLoaded", init);
+
+})();
+</script>
+</body>
+</html>

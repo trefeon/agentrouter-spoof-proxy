@@ -44,6 +44,7 @@ const (
 	ScenarioPartialClose      = "partial_close"
 	ScenarioSlowStream        = "slow_stream"
 	ScenarioHang              = "hang"
+	ScenarioJson200           = "json_200"
 	ScenarioConnectionError   = "connection_error"
 	ScenarioFailThenSuccess   = "fail_then_success"
 )
@@ -238,6 +239,22 @@ func (m *MockUpstream) LastPost() *Received {
 
 // ── HTTP routing (mock-upstream.mjs _route) ──────────────────────────────────
 
+// chatPostPrefixes are the POST paths served by handleChat: the chat routes
+// plus the OpenAI-style routes exercised by the E2E suite.
+var chatPostPrefixes = []string{
+	"/v1/chat/completions",
+	"/v1/completions",
+	"/v1/responses",
+	"/v1/embeddings",
+	"/v1/moderations",
+	"/v1/rerank",
+	"/v1/edits",
+	"/v1/images/",
+	"/v1/audio/",
+	"/v1/alpha/search",
+	"/v1/messages",
+}
+
 func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Record first: method, URL, headers, body (mirrors req.on("end") then
 	// _route in the Node mock).
@@ -260,10 +277,12 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		m.handleGet(w)
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, "/v1/chat/completions") || strings.HasPrefix(r.URL.Path, "/v1/messages") {
-		m.record(rec)
-		m.handleChat(w)
-		return
+	for _, prefix := range chatPostPrefixes {
+		if strings.HasPrefix(r.URL.Path, prefix) {
+			m.record(rec)
+			m.handleChat(w)
+			return
+		}
 	}
 	m.record(rec)
 	w.WriteHeader(http.StatusNotFound)
@@ -403,6 +422,11 @@ func (m *MockUpstream) handleChat(w http.ResponseWriter) {
 		}
 		m.sse(w, SSEChunks, nil, nil)
 
+	case ScenarioJson200:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"mock","object":"model"}]}`)
+
 	default:
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -455,4 +479,3 @@ func (m *MockUpstream) sleep(d time.Duration) {
 	case <-time.After(d):
 	}
 }
-

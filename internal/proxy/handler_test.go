@@ -62,7 +62,7 @@ func testHandler(cfg *config.Config) (*Handler, *auth.Store, *resilience.Breaker
 	discovery := models.NewDiscovery(cfg.StaticModelIDs())
 	client := &http.Client{Transport: cfg.Transport()}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := NewHandler(cfg, wafStore, breaker, discovery, health, recorder, client, logger)
+	h := NewHandler(cfg, wafStore, breaker, discovery, health, recorder, client, logger, nil)
 	return h, wafStore, breaker, health, recorder
 }
 
@@ -571,4 +571,3 @@ func TestHandlerClientDisconnect(t *testing.T) {
 		t.Errorf("unexpected response status %d written for disconnected client", rec.Code)
 	}
 }
-

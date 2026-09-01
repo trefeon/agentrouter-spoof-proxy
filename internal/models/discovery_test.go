@@ -12,13 +12,13 @@ import (
 )
 
 func TestNewDiscoveryStatic(t *testing.T) {
-	d := NewDiscovery([]string{"gpt-5.6-sol", "claude-opus-5", " claude-opus-4-8 "})
+	d := NewDiscovery([]string{"claude-opus-4-8", "claude-opus-5", "deepseek-v4-flash", "glm-5.3", " gpt-5.6-sol "})
 	if got := d.Source(); got != "static" {
 		t.Fatalf("Source() = %q, want static", got)
 	}
 	list := d.List()
-	if len(list) != 3 {
-		t.Fatalf("List() has %d models, want 3", len(list))
+	if len(list) != 5 {
+		t.Fatalf("List() has %d models, want 5", len(list))
 	}
 	for _, m := range list {
 		if m.ID == "" {
@@ -226,4 +226,3 @@ func stripScheme(u string) string {
 	}
 	return u
 }
-

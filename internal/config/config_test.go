@@ -92,6 +92,7 @@ func TestValidate(t *testing.T) {
 		SSEChunkTimeoutMs: 1, BodyUploadTimeoutMs: 1, SlowResponseMs: 1,
 		WarmupIntervalMs: 1, DiscoveryIntervalMs: 1, MaxRetries: 0,
 		RetryDelayMs: 0,
+		ExposureMode: "auto",
 	}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
@@ -117,6 +118,7 @@ func TestValidate(t *testing.T) {
 		{"retry delay negative", func(c *Config) { c.RetryDelayMs = -1 }, "RETRY_DELAY_MS"},
 		{"bad protocol", func(c *Config) { c.TargetProto = "ftp" }, "TARGET_PROTOCOL"},
 		{"empty listen address", func(c *Config) { c.ListenAddr = "" }, "LISTEN_ADDRESS"},
+		{"bad exposure mode", func(c *Config) { c.ExposureMode = "weird" }, "EXPOSURE_MODE"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -137,9 +139,9 @@ func TestStaticModelIDs(t *testing.T) {
 	clear := clearEnv(t)
 	defer clear()
 
-	c := &Config{ModelsCSV: "gpt-5.6-sol, claude-opus-5 ,claude-opus-4-8"}
+	c := &Config{ModelsCSV: "claude-opus-4-8, claude-opus-5 , deepseek-v4-flash ,glm-5.3,gpt-5.6-sol"}
 	ids := c.StaticModelIDs()
-	want := []string{"gpt-5.6-sol", "claude-opus-5", "claude-opus-4-8"}
+	want := []string{"claude-opus-4-8", "claude-opus-5", "deepseek-v4-flash", "glm-5.3", "gpt-5.6-sol"}
 	if len(ids) != len(want) {
 		t.Fatalf("got %v, want %v", ids, want)
 	}
@@ -166,6 +168,8 @@ func clearEnv(t *testing.T) func() {
 		"BODY_UPLOAD_TIMEOUT_MS", "SLOW_RESPONSE_MS", "WARMUP_INTERVAL_MS", "DISCOVERY_INTERVAL_MS",
 		"MAX_RETRIES", "RETRY_DELAY_MS", "RETRY_ON_5XX", "STRIP_THINKING_TAGS",
 		"MODELS_CSV", "AR_API_KEY", "INJECT_SYSTEM_PROMPT", "PROXY_AUTH_TOKEN", "LOG_LEVEL",
+		"EXPOSURE_MODE", "CHECKIN_CMD", "CHECKIN_ARGS", "CHECKIN_WORKDIR", "CHECKIN_SCHEDULE",
+		"CHECKIN_RANDOM_WINDOW_START", "CHECKIN_RANDOM_WINDOW_END",
 	}
 	saved := map[string]string{}
 	for _, v := range vars {
@@ -180,4 +184,3 @@ func clearEnv(t *testing.T) func() {
 		}
 	}
 }
-
