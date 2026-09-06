@@ -30,12 +30,12 @@
 
 **agentrouter.org** pakai:
 - **WAF (Web Application Firewall)** dari Alibaba Cloud, butuh cookie `acw_tc` yang di-refresh berkala
-- **Deteksi User-Agent**, cuma klien resmi (Claude Code) yang dilayani
+- **Deteksi User-Agent**, cuma klien yang dikenal yang dilayani
 - **Rate limiting** per channel
 
 **Proxy ini yang menangani:**
 - Refresh cookie WAF tiap 3 menit
-- Menyamar jadi Claude Code CLI
+- Menyamar jadi klien resmi (default: opencode, ganti via `SPOOF_PROFILE`)
 - Retry otomatis jika kena blokir WAF
 - Circuit breaker jika upstream bermasalah
 
@@ -125,8 +125,8 @@ Hasil yang diharapkan:
   "ok": true,
   "upstream": "agentrouter.org:443",
   "modelSource": "static",
-  "staticModels": 3,
-  "availableModels": 3,
+  "staticModels": 5,
+  "availableModels": 5,
   "activeStreams": 0,
   "wafCookie": true,
   "circuitOpen": false,
@@ -142,6 +142,16 @@ Hasil yang diharapkan:
 ## Langkah 3: Hubungkan ke Jaringan 9Router
 
 Langkah ini tergantung cara deploy di Langkah 1.
+
+### Cara termudah: pakai IP host (tanpa gabung network)
+
+Kalau 9Router dan proxy jalan sebagai container Docker beda network di satu host, tidak perlu `docker network connect`. Proxy mem-publish port 8318 di semua interface, jadi dari container 9Router langsung pakai IP LAN host:
+
+```
+Base URL: http://IP_HOST:8318/v1
+```
+
+Contoh: proxy di `192.168.10.3` → Base URL `http://192.168.10.3:8318/v1`. Sudah terbukti jalan tanpa join network. Jangan pakai IP internal container proxy (mis. `172.x.x.x`), itu tidak bisa dijangkau dari network lain.
 
 ### Jika pakai Docker (Opsi A)
 
@@ -221,17 +231,23 @@ Isi form seperti ini:
 | **Name** | Bebas, contoh: `AgentRouter` |
 | **Prefix** | `AG` (singkatan AgentRouter, buat prefix model ID) |
 | **API Type** | `chat completions` |
-| **Base URL** | `http://localhost:8318/v1` |
+| **Base URL** | Lihat tabel di bawah, sesuaikan dengan cara deploy |
 
-> **Catatan:** Base URL pakai `localhost:8318` karena proxy jalan di host yang sama. Kalau proxy di server lain, ganti `localhost` dengan IP server proxy.
->
-> **Windows (Docker Desktop):** Kalau proxy jalan langsung di Windows dan 9Router di Docker, pakai `http://host.docker.internal:8318/v1` sebagai Base URL.
+Pilih Base URL sesuai posisi 9Router terhadap proxy (`localhost` di dalam container = container itu sendiri, bukan host):
+
+| Posisi | Base URL |
+|--------|----------|
+| Satu network Docker (setelah gabung network) | `http://agentrouter-proxy:8318/v1` |
+| Beda network Docker, satu host (cara termudah) | `http://IP_HOST:8318/v1`, contoh `http://192.168.10.3:8318/v1` |
+| Proxy binary di host, 9Router juga di host | `http://localhost:8318/v1` |
+| Proxy di server lain | `http://IP_SERVER_PROXY:8318/v1` |
+| Proxy langsung di Windows/Mac, 9Router di Docker Desktop | `http://host.docker.internal:8318/v1` |
 
 ### 4.3: Import Model dari /models
 
 1. Setelah provider kesimpan, cari tombol **Import from /models** (atau sejenisnya)
 2. Klik
-3. 9Router akan panggil `http://localhost:8318/v1/models` dan ambil daftar model otomatis
+3. 9Router akan panggil `<Base URL>/models` (Base URL yang diisi di 4.2, mis. `http://192.168.10.3:8318/v1/models`) dan ambil daftar model otomatis
 
 Model yang akan muncul:
 - `gpt-5.6-sol`
@@ -371,6 +387,7 @@ PROXY_AUTH_TOKEN=GANTI_DENGAN_TOKEN_RAHASIA_PANJANG
 | `wafCookie: false` | Proxy gagal warmup | Cek koneksi ke `agentrouter.org`, tunggu beberapa detik |
 | `circuitOpen: true` | 5+ gagal berurutan (transport / 5xx final) | Tunggu backoff, cek ketersediaan agentrouter.org |
 | `NoChannelError` (503) | Tidak ada channel untuk model itu | Coba model lain atau retry |
+| 401 `new_api_error` token invalid di semua model | API key di provider 9Router salah / rusak saat paste | Hapus total field key, paste ulang persis satu baris tanpa spasi/newline. Pastikan itu key agentrouter.org, bukan key 9Router. Tunggu lock 2 menit 9Router reda lalu test lagi |
 | 403 pada request | WAF block atau kuota habis | WAF: di-retry otomatis. Kuota: ganti model |
 | 502/504 | Timeout dari upstream | Cek jaringan, naikkan `REQUEST_TIMEOUT_MS` / `RESPONSE_TIMEOUT_MS` |
 | 429 | Rate limit TPM | Tunggu dan retry (model di-lock sementara) |
@@ -384,6 +401,6 @@ PROXY_AUTH_TOKEN=GANTI_DENGAN_TOKEN_RAHASIA_PANJANG
 
 - **API key agentrouter cukup di 9Router**, proxy tidak perlu tau
 - **Proxy bisa dipakai tanpa 9Router**, langsung `curl` ke `localhost:8318/v1/messages`
-- **Kalau 9Router dan proxy beda server**, ganti `localhost` dengan IP server proxy
+- **Kalau 9Router dan proxy beda container satu host**, pakai IP LAN host (contoh `http://192.168.10.3:8318/v1`), bukan `localhost`. Beda server baru ganti dengan IP server proxy
 - **Nyalain `LOG_LEVEL=debug`** di `.env` kalau mau lihat log detail (chunk, timing, dll)
 - **Pakai `AR_API_KEY`** buat auto-discovery model biar daftar model selalu update

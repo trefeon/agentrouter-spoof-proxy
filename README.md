@@ -1,6 +1,6 @@
 # AgentRouter Spoof Proxy
 
-Cross-platform reverse proxy in Go that bypasses the AgentRouter WAF by spoofing Claude Code headers. Ships as a single static binary with no runtime dependencies. Docker image is about 15 to 25 MB.
+Cross-platform reverse proxy in Go that bypasses the AgentRouter WAF by spoofing first-party CLI headers (default opencode, see `SPOOF_PROFILE`). Ships as a single static binary with no runtime dependencies. Docker image is about 15 to 25 MB.
 
 > 🇮🇩 **[Panduan 9Router (Bahasa Indonesia)](docs/panduan-9router.md):** tutorial in Indonesian for integrating with 9Router.
 
@@ -67,7 +67,7 @@ curl http://localhost:8318/health
 ```
 
 ```json
-{"ok":true,"upstream":"agentrouter.org:443","modelSource":"static","staticModels":3,"availableModels":3,"activeStreams":0,"wafCookie":true,"circuitOpen":false,"consecutiveFails":0,"modelHealth":[]}
+{"ok":true,"upstream":"agentrouter.org:443","modelSource":"static","staticModels":5,"availableModels":5,"activeStreams":0,"wafCookie":true,"circuitOpen":false,"consecutiveFails":0,"modelHealth":[]}
 ```
 
 Wait 5 seconds if `wafCookie: false`. WAF warmup runs at startup.
@@ -81,10 +81,10 @@ Wait 5 seconds if `wafCookie: false`. WAF warmup runs at startup.
    - **Name:** `AgentRouter`
    - **Prefix:** `AG`
    - **API Type:** `chat completions`
-   - **Base URL:** `http://localhost:8318/v1` (or `http://172.18.0.3:8318/v1` if Docker-to-Docker)
+   - **Base URL:** `http://localhost:8318/v1` for host-to-host. Docker-to-Docker on one host: use the host LAN IP (e.g. `http://192.168.10.3:8318/v1`), never a `172.x` container IP. Full per-case table in [Panduan 9Router](docs/panduan-9router.md).
 3. Click **Import from /models**
 4. **Add API Key** → paste your AgentRouter API key (store it only in 9Router, not in the proxy)
-5. Model will appear as `AG-gpt-5.6-sol`, `AG-claude-opus-5`, `AG-deepseek-v4-flash`, `AG-glm-5.3`, etc.
+5. Model will appear as `AG-gpt-5.6-sol`, `AG-claude-opus-5`, `AG-claude-opus-4-8`, `AG-deepseek-v4-flash`, `AG-glm-5.3`.
 
 > Windows Docker Desktop: use `http://host.docker.internal:8318/v1`
 
@@ -102,7 +102,7 @@ Wait 5 seconds if `wafCookie: false`. WAF warmup runs at startup.
 | **Prompt injection** | Optional system prompt injection (`INJECT_SYSTEM_PROMPT`) |
 | **Model discovery** | Optional dynamic model list via `AR_API_KEY` |
 | **Bounded bodies** | 20MB limit gives clean `413`, stalled uploads give `408` |
-| **Narrow proxy surface** | Only 3 API routes are proxied, binds to localhost by default, optional token auth |
+| **Narrow proxy surface** | Only the POST API routes below are proxied, binds to localhost by default, optional token auth |
 | **Graceful shutdown** | Drains active streams, cancels schedulers, 15s force-exit bound |
 
 ---
@@ -116,8 +116,13 @@ Wait 5 seconds if `wafCookie: false`. WAF warmup runs at startup.
 | `/v1/messages` | POST | Anthropic Messages API, proxied |
 | `/messages` | POST | Auto-rewritten to `/v1/messages` |
 | `/v1/chat/completions` | POST | OpenAI Chat Completions, proxied |
+| `/v1/completions`, `/v1/responses`, `/v1/responses/compact` | POST | OpenAI completions + responses, proxied |
+| `/v1/embeddings`, `/v1/moderations`, `/v1/rerank`, `/v1/edits` | POST | OpenAI helpers, proxied |
+| `/v1/images/*`, `/v1/audio/*`, `/v1/alpha/search` | POST | Media + search, proxied |
+| `/v1/messages/count_tokens` | POST | Local token estimate, never reaches upstream |
+| `/v1/models/{model}` | GET | Single model lookup, served locally |
 
-Only the three proxy routes above are ever forwarded upstream. Unknown paths
+Only the POST proxy routes above are ever forwarded upstream. Unknown paths
 return a local `404`, unsupported methods return a local `405`, and when
 `PROXY_AUTH_TOKEN` is set, missing or invalid credentials return `401` before any
 upstream work. SSE terminal events depend on the format. Anthropic streams end with
@@ -139,7 +144,9 @@ All values have defaults. Copy `.env.example` to `.env` only if you need to chan
 | `TARGET_HOST` | `agentrouter.org` | Upstream host |
 | `TARGET_PORT` | `443` | Upstream port |
 | `WARMUP_INTERVAL_MS` | `180000` | WAF cookie warmup interval (3 min) |
-| `REQUEST_TIMEOUT_MS` | `300000` | Request timeout (5 min) |
+| `SLOW_RESPONSE_MS` | `30000` | Mark model degraded after slow successful streams |
+| `LOG_LEVEL` | `info` | Log verbosity: `debug` or `info` |
+| `REQUEST_TIMEOUT_MS` | `300000` | Parsed but currently unused; upstream is guarded by `RESPONSE_TIMEOUT_MS` + SSE watchdogs |
 | `RESPONSE_TIMEOUT_MS` | `30000` | Wait for upstream response headers before 504 or retry |
 | `SSE_IDLE_TIMEOUT_MS` | `600000` | Kill stream after no SSE events (dead upstream). OpenAI-format upstreams send no liveness pings, so a genuinely silent reasoning pause near this timeout will be cut. Raise it for long-thinking OpenAI models |
 | `SSE_CHUNK_TIMEOUT_MS` | `30000` | Stall watchdog. Reports slow streams and keeps the connection alive |
@@ -267,7 +274,7 @@ cmd/proxy/main.go: thin entry, config validation, signal shutdown, -healthcheck 
 ├── internal/proxy: handler (retry loop), SSE pump, pure helpers (think-strip, frame parser)
 ├── internal/server: routing, schedulers, graceful shutdown
 ├── testutil/mockupstream: scripted mock upstream for tests
-└── e2e: 67 E2E and 7 issue-regression tests
+└── e2e: 81 tests (74 proxy + 7 issue-regression, all passing)
 ```
 
 ---
@@ -277,13 +284,13 @@ cmd/proxy/main.go: thin entry, config validation, signal shutdown, -healthcheck 
 > Runtime is zero-dependency. Dev tooling: Go 1.26+, golangci-lint (optional).
 
 ```bash
-# Everything (~222 tests, all packages)
+# Everything (257 test funcs: 176 unit + 81 E2E, all packages)
 go test ./...
 
 # Fast unit tests (pure core + pump + handler)
 go test ./internal/...
 
-# E2E: in-process proxy + mock upstream (62 tests)
+# E2E: in-process proxy + mock upstream (81 tests)
 go test ./e2e/
 
 # Issue-verification regression tests (7 tests)
@@ -331,6 +338,9 @@ A: Rejected with HTTP `413 payload_too_large`. The body is never forwarded upstr
 
 **Q: Where is the API key stored?**
 A: **Only in 9Router**, not in the proxy. The proxy only spoofs headers and stores no credentials. If the proxy is exposed (not localhost), set `PROXY_AUTH_TOKEN` and use it as a Bearer token in 9Router.
+
+**Q: 9Router shows 401 "invalid token" on every model?**
+A: The proxy forwards your key untouched, so the upstream is rejecting what 9Router sends. Re-paste the agentrouter.org key into the 9Router provider (exactly one line, no leading/trailing spaces, and the AgentRouter key, not the 9Router key), then wait out the 2-minute 9Router model lock and retry.
 
 **Q: WAF cookie expired?**
 A: The proxy refreshes it automatically every 3 minutes via warmup. If a 403 WAF block happens mid-request, it re-warms and retries automatically.

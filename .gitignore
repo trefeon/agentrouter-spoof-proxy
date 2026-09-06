@@ -5,6 +5,8 @@ node_modules/
 .env
 .env.local
 .env.*.local
+# Local test keys (never commit)
+API_Keys_For_Testing
 
 # Log files
 *.log

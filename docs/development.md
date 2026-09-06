@@ -92,5 +92,5 @@ Private local notes stay in `docs/dev.md` which is gitignored. Public dev docs l
 ## Troubleshooting
 
 - `wafCookie: false` on `/health`: warmup is still running, wait 5 seconds and retry.
-- 9Router cannot reach proxy on Docker: put both on the same Docker network or use `host.docker.internal` on Windows and Mac.
+- 9Router cannot reach proxy on Docker: put both on the same Docker network, point 9Router at the host LAN IP when they are on different networks on one host (e.g. `http://192.168.10.3:8318/v1`), or use `host.docker.internal` on Windows and Mac.
 - SSE cuts early: check logs for `SLOW STREAM` and raise `SSE_CHUNK_TIMEOUT_MS` or `SSE_IDLE_TIMEOUT_MS`.

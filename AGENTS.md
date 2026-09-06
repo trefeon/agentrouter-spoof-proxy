@@ -75,7 +75,7 @@ Expected: `{"ok":true,"upstream":"agentrouter.org:443","modelSource":"static","s
 | `internal/resilience/breaker.go` | Circuit breaker (atomics, final-5xx accounting) |
 | `internal/server/server.go` | Routing (ServeMux), auth, warmup/discovery/probe schedulers, graceful shutdown |
 | `testutil/mockupstream/mockupstream.go` | Scripted mock upstream (24 scenarios) for tests |
-| `e2e/proxy_e2e_test.go` | 72 E2E tests (in-process proxy + mock upstream) |
+| `e2e/proxy_e2e_test.go` | 81 E2E tests (in-process proxy + mock upstream) |
 | `internal/logstore/logstore.go` | Ring-buffer request/error log store |
 | `internal/checkin/manager.go` | Auto check-in command runner and scheduler |
 | `internal/dashboard/dashboard.go` | Embedded admin web UI (HTML+CSS+JS) |
@@ -92,7 +92,7 @@ Expected: `{"ok":true,"upstream":"agentrouter.org:443","modelSource":"static","s
 ```bash
 go build ./...            # compile check
 go vet ./...              # static analysis
-go test ./...             # all tests (~222 across 9 packages)
+go test ./...             # all tests (~257 across 9 packages)
 go test ./e2e/            # E2E only
 go test -race ./...       # race detector (needs cgo toolchain)
 gofmt -l .                # formatting check
