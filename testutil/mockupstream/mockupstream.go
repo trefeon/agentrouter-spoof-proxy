@@ -36,6 +36,8 @@ const (
 	ScenarioNonWAF405         = "non_waf_405"
 	ScenarioError500          = "error_500"
 	ScenarioSensitiveWords    = "sensitive_words"
+	ScenarioQuota402          = "quota_402"
+	ScenarioNoChannel503      = "no_channel_503"
 	ScenarioError400          = "error_400"
 	ScenarioError429          = "error_429"
 	ScenarioError502          = "error_502"
@@ -364,6 +366,16 @@ func (m *MockUpstream) handleChat(w http.ResponseWriter) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = io.WriteString(w, `{"error":{"message":"sensitive words detected (request id: test-123)","type":"new_api_error","param":"","code":"sensitive_words_detected"}}`)
+
+	case ScenarioQuota402:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = io.WriteString(w, `{"error":{"message":"Budget pool quota has been exhausted. Please ask an administrator to increase the limit.","type":"new_api_error"}}`)
+
+	case ScenarioNoChannel503:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":{"message":"当前分组 default 下对于模型 glm-5.3 无可用渠道 (request id: test-456)","type":"new_api_error"}}`)
 
 	case ScenarioError400:
 		w.Header().Set("Content-Type", "application/json")

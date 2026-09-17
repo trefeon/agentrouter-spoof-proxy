@@ -567,6 +567,51 @@ func TestHandlerSensitiveWordsNoHealthPenalty(t *testing.T) {
 	h.assertActive(t, 0)
 }
 
+// Deterministic account-side rejections (402 quota, 503 no-channel) are
+// passed to the caller for fallback: never retried, never a health mark,
+// never a breaker failure — mirroring TestHandlerSensitiveWordsNoHealthPenalty.
+func TestHandlerAccountSideNoHealthPenalty(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"402 budget quota", http.StatusPaymentRequired, `{"error":{"message":"Budget pool quota has been exhausted.","type":"new_api_error"}}`},
+		{"503 no channel", http.StatusServiceUnavailable, `{"error":{"message":"当前分组 default 下对于模型 glm-5.3 无可用渠道","type":"new_api_error"}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu atomic.Int64
+			cfg := testUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			// testUpstream sets RetryOn5xx=true: exactly 1 upstream POST
+			// proves a deterministic rejection is never retried.
+			h, _, breaker, health, _ := testHandler(cfg)
+			rec := proxyRequest(t, h, http.MethodPost, "/v1/messages", `{"model":"m1","messages":[]}`, nil)
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.status)
+			}
+			if rec.Body.String() != tc.body {
+				t.Errorf("body = %q, want intact passthrough", rec.Body.String())
+			}
+			if got := mu.Load(); got != 1 {
+				t.Errorf("upstream POSTs = %d, want 1 (no retry on deterministic rejection)", got)
+			}
+			if !health.IsHealthy("m1") {
+				t.Error("model must stay healthy after an account-side rejection")
+			}
+			if fails := breaker.ConsecutiveFails(); fails != 0 {
+				t.Errorf("breaker fails = %d, want 0 (account-side rejection neither fails nor resets)", fails)
+			}
+			h.assertActive(t, 0)
+		})
+	}
+}
+
 // Client context cancellation aborts the request without a failure response.
 func TestHandlerClientDisconnect(t *testing.T) {
 	// A body that blocks reading until released (simulates a slow/hanging

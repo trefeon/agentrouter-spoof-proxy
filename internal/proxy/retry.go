@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net/http"
 	"strings"
 	"time"
 )
@@ -90,4 +91,22 @@ func IsContentFilterRejection(statusCode int, body []byte) bool {
 		return false
 	}
 	return strings.Contains(string(body), "sensitive_words")
+}
+
+// IsAccountSideRejection reports whether an upstream response is a
+// deterministic account-side rejection rather than an outage: any 402
+// (payment/quota, e.g. "Budget pool quota has been exhausted") or a 503
+// carrying a no-channel marker ("no available channel" / "无可用渠道").
+// Retrying cannot help and the model itself may be healthy for other keys,
+// so callers must skip retry, health marks, and breaker failure accounting
+// and let the caller (9Router) handle fallback. Matching is case-sensitive.
+func IsAccountSideRejection(statusCode int, body []byte) bool {
+	if statusCode == http.StatusPaymentRequired {
+		return true
+	}
+	if statusCode != http.StatusServiceUnavailable {
+		return false
+	}
+	s := string(body)
+	return strings.Contains(s, "no available channel") || strings.Contains(s, "无可用渠道")
 }

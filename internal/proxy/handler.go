@@ -354,25 +354,27 @@ func (h *Handler) doRequest(w http.ResponseWriter, r *http.Request, body []byte,
 			continue // WAF retried; next attempt
 		}
 
-		// Deterministic content-filter rejections (5xx + sensitive_words) are
-		// client-side, not an upstream outage: never retry, never mark model
-		// health, breaker neither-fails-nor-succeeds (mirror the 4xx
-		// accounting below). The body is buffered and restored so
-		// forwardNon200 passes the status + body through intact and stats
-		// still record. ResponseHasEmptyOutput only fires on 200, so a
-		// filter hit leaves zero health marks by construction.
-		contentFilter := false
-		if status >= 500 && status <= 599 {
+		// Deterministic non-outage rejections are client/account-side, not an
+		// upstream outage: content-filter 5xx (sensitive_words) and
+		// account-side responses (402 quota, 503 no-channel). Never retry,
+		// never mark model health, breaker neither-fails-nor-succeeds
+		// (mirror the 4xx accounting below) so the caller (9Router) handles
+		// fallback. The body is buffered and restored so forwardNon200
+		// passes the status + body through intact and stats still record.
+		// ResponseHasEmptyOutput only fires on 200, so an exempt hit leaves
+		// zero health marks by construction.
+		noPenalty := false
+		if (status >= 500 && status <= 599) || status == http.StatusPaymentRequired {
 			raw, readErr := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			if readErr == nil && IsContentFilterRejection(status, raw) {
-				contentFilter = true
+			if readErr == nil && (IsContentFilterRejection(status, raw) || IsAccountSideRejection(status, raw)) {
+				noPenalty = true
 			}
 			resp.Body = io.NopCloser(bytes.NewReader(raw))
 		}
 
 		// 5xx retry, if exhausted, mark model unhealthy.
-		if !contentFilter && IsRetryable(status, "", h.Cfg.RetryOn5xx) && attempt < h.Cfg.MaxRetries {
+		if !noPenalty && IsRetryable(status, "", h.Cfg.RetryOn5xx) && attempt < h.Cfg.MaxRetries {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 			h.Log.Info(fmt.Sprintf("%s %s <- %d, retrying (%d/%d)...", method, rawPath, status, attempt+1, h.Cfg.MaxRetries))
@@ -386,14 +388,15 @@ func (h *Handler) doRequest(w http.ResponseWriter, r *http.Request, body []byte,
 		if status == http.StatusTooManyRequests {
 			h.Health.MarkExhausted(model)
 		}
-		if status >= 500 && !contentFilter {
+		if status >= 500 && !noPenalty {
 			h.Health.MarkFailed(model, status)
 		}
 
 		// Circuit accounting for a *final* upstream response: 5xx → failure,
 		// 429 → neither (model lockout only), 4xx → neither, <400 → success.
-		// Content-filter 5xx → neither (deterministic client-side rejection).
-		if status >= 500 && !contentFilter {
+		// Content-filter and account-side rejections → neither (deterministic,
+		// handled by the caller).
+		if status >= 500 && !noPenalty {
 			h.Breaker.RecordFailure()
 		} else if status < 400 {
 			h.Breaker.RecordSuccess()

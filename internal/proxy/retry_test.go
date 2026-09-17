@@ -154,3 +154,29 @@ func TestIsContentFilterRejection(t *testing.T) {
 		})
 	}
 }
+
+func TestIsAccountSideRejection(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   []byte
+		want   bool
+	}{
+		{"402 budget quota any body", 402, []byte(`{"error":{"message":"Budget pool quota has been exhausted."}}`), true},
+		{"402 empty body still account-side", 402, nil, true},
+		{"503 chinese no-channel marker", 503, []byte(`{"error":{"message":"当前分组 default 下对于模型 glm-5.3 无可用渠道"}}`), true},
+		{"503 english no-channel marker", 503, []byte("no available channel for model"), true},
+		{"503 plain outage is not account-side", 503, []byte(`{"error":{"message":"NoChannelError"}}`), false},
+		{"503 empty body is not account-side", 503, nil, false},
+		{"500 budget body is not account-side", 500, []byte("Budget pool quota"), false},
+		{"429 budget body is not account-side", 429, []byte("Budget pool quota"), false},
+		{"200 no-channel body is not account-side", 200, []byte("无可用渠道"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsAccountSideRejection(tc.status, tc.body); got != tc.want {
+				t.Errorf("IsAccountSideRejection(%d, %q) = %v, want %v", tc.status, tc.body, got, tc.want)
+			}
+		})
+	}
+}
