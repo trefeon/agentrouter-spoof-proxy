@@ -84,7 +84,7 @@ Wait 5 seconds if `wafCookie: false`. WAF warmup runs at startup.
    - **Base URL:** `http://localhost:8318/v1` for host-to-host. Docker-to-Docker on one host: use the host LAN IP (e.g. `http://192.168.10.3:8318/v1`), never a `172.x` container IP. Full per-case table in [Panduan 9Router](docs/panduan-9router.md).
 3. Click **Import from /models**
 4. **Add API Key** → paste your AgentRouter API key (store it only in 9Router, not in the proxy)
-5. Model will appear as `AG-gpt-5.6-sol`, `AG-claude-opus-5`, `AG-claude-opus-4-8`, `AG-deepseek-v4-flash`, `AG-glm-5.3`.
+5. Model will appear as `AG-gpt-5.6-sol`, `AG-gpt-6-astra`, `AG-claude-opus-5`, `AG-claude-opus-4-8`, `AG-deepseek-v4-flash`, `AG-glm-5.3`.
 
 > Windows Docker Desktop: use `http://host.docker.internal:8318/v1`
 
@@ -156,7 +156,7 @@ All values have defaults. Copy `.env.example` to `.env` only if you need to chan
 | `RETRY_ON_5XX` | `false` | Also retry on 5xx responses (warning: causes double token billing) |
 | `STRIP_THINKING_TAGS` | `true` | Remove `<think>...</think>` from OpenAI-format SSE text. Anthropic thinking blocks pass through |
 | `SPOOF_PROFILE` | `opencode` | Which CLI to impersonate upstream: `opencode` (default), `claude-code`, `codex`, `qwen`, `cline`, `roo`, `kilo`, `cursor`, `trae`, `pi`, `openclaw`, `hermes`, `droid`, `copilot`, `gemini`, `generic`. Add reference clones under `reference/` to craft new profiles in `internal/auth/profile.go` |
-| `MODELS_CSV` | `claude-opus-4-8,claude-opus-5,deepseek-v4-flash,glm-5.3,gpt-5.6-sol` | Static fallback model list (used when `AR_API_KEY` is not set) |
+| `MODELS_CSV` | `claude-opus-4-8,claude-opus-5,deepseek-v4-flash,glm-5.3,gpt-5.6-sol,gpt-6-astra` | Static fallback model list (used when `AR_API_KEY` is not set) |
 | `AR_API_KEY` | _(empty)_ | Enable dynamic model discovery |
 | `DISCOVERY_INTERVAL_MS` | `600000` | Dynamic model discovery refresh interval |
 | `INJECT_SYSTEM_PROMPT` | _default persona_ | System prompt injected into requests (unset = default, empty = disabled) |
@@ -255,6 +255,7 @@ to `internal/auth/profile.go` → `GenericHeadersForProfile` /
 | `claude-opus-4-8` | 1M | 128K | $5 / $25 | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) |
 | `deepseek-v4-flash` | — | — | — | [DeepSeek](https://api-docs.deepseek.com/) |
 | `glm-5.3` | — | — | — | [Zhipu/Z.ai](https://open.bigmodel.cn/) |
+| `gpt-6-astra` | — | — | — | — |
 
 ## Architecture
 ```

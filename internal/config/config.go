@@ -51,7 +51,7 @@ type Config struct {
 	RetryOn5xx        bool `env:"RETRY_ON_5XX" envDefault:"false"`
 	StripThinkingTags bool `env:"STRIP_THINKING_TAGS" envDefault:"true"`
 
-	ModelsCSV          string `env:"MODELS_CSV" envDefault:"claude-opus-4-8,claude-opus-5,deepseek-v4-flash,glm-5.3,gpt-5.6-sol"`
+	ModelsCSV          string `env:"MODELS_CSV" envDefault:"claude-opus-4-8,claude-opus-5,deepseek-v4-flash,glm-5.3,gpt-5.6-sol,gpt-6-astra"`
 	ARAPIKey           string `env:"AR_API_KEY"`
 	InjectSystemPrompt string `env:"INJECT_SYSTEM_PROMPT"`
 	ProxyAuthToken     string `env:"PROXY_AUTH_TOKEN"`

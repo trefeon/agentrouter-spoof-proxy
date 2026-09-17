@@ -255,6 +255,7 @@ Model yang akan muncul:
 - `claude-opus-4-8`
 - `deepseek-v4-flash`
 - `glm-5.3`
+- `gpt-6-astra`
 
 Kalau kamu aktifkan **Model Auto-Discovery** (pakai `AR_API_KEY`), daftar model akan mengikuti akun agentrouter.org kamu, jadi selalu update.
 
@@ -359,6 +360,7 @@ Masukkan API key 9Router (bukan API key agentrouter).
 | `AG-claude-opus-4-8` | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) | 1M | 128K | $5 / $25 |
 | `AG-deepseek-v4-flash` | [DeepSeek](https://api-docs.deepseek.com/) | — | — | — |
 | `AG-glm-5.3` | [Zhipu/Z.ai](https://open.bigmodel.cn/) | — | — | — |
+| `AG-gpt-6-astra` | — | — | — | — |
 
 ---
 
