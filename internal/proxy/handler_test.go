@@ -567,10 +567,10 @@ func TestHandlerSensitiveWordsNoHealthPenalty(t *testing.T) {
 	h.assertActive(t, 0)
 }
 
-// Deterministic account-side rejections (402 quota, 503 no-channel) are
-// passed to the caller for fallback: never retried, never a health mark,
-// never a breaker failure — mirroring TestHandlerSensitiveWordsNoHealthPenalty.
-func TestHandlerAccountSideNoHealthPenalty(t *testing.T) {
+// Deterministic non-outage rejections (402 quota, 503 no-channel, 400
+// content-blocked) are passed to the caller for fallback: never retried,
+// never a health mark, never a breaker failure.
+func TestHandlerDeterministicNoHealthPenalty(t *testing.T) {
 	cases := []struct {
 		name   string
 		status int
@@ -578,6 +578,7 @@ func TestHandlerAccountSideNoHealthPenalty(t *testing.T) {
 	}{
 		{"402 budget quota", http.StatusPaymentRequired, `{"error":{"message":"Budget pool quota has been exhausted.","type":"new_api_error"}}`},
 		{"503 no channel", http.StatusServiceUnavailable, `{"error":{"message":"当前分组 default 下对于模型 glm-5.3 无可用渠道","type":"new_api_error"}}`},
+		{"400 content-blocked", http.StatusBadRequest, `{"error":{"code":"content-blocked","message":"content-blocked","param":"","type":"agent_router_api_error"}}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

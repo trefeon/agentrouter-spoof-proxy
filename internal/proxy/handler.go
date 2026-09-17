@@ -355,16 +355,16 @@ func (h *Handler) doRequest(w http.ResponseWriter, r *http.Request, body []byte,
 		}
 
 		// Deterministic non-outage rejections are client/account-side, not an
-		// upstream outage: content-filter 5xx (sensitive_words) and
-		// account-side responses (402 quota, 503 no-channel). Never retry,
-		// never mark model health, breaker neither-fails-nor-succeeds
-		// (mirror the 4xx accounting below) so the caller (9Router) handles
-		// fallback. The body is buffered and restored so forwardNon200
-		// passes the status + body through intact and stats still record.
-		// ResponseHasEmptyOutput only fires on 200, so an exempt hit leaves
-		// zero health marks by construction.
+		// upstream outage: content-filter responses (5xx sensitive_words, 400
+		// content-blocked) and account-side responses (402 quota, 503
+		// no-channel). Never retry, never mark model health, breaker
+		// neither-fails-nor-succeeds (mirror the 4xx accounting below) so the
+		// caller (9Router) handles fallback. The body is buffered and restored
+		// so forwardNon200 passes the status + body through intact and stats
+		// still record. ResponseHasEmptyOutput only fires on 200, so an exempt
+		// hit leaves zero health marks by construction.
 		noPenalty := false
-		if (status >= 500 && status <= 599) || status == http.StatusPaymentRequired {
+		if (status >= 500 && status <= 599) || status == http.StatusPaymentRequired || status == http.StatusBadRequest {
 			raw, readErr := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
 			if readErr == nil && (IsContentFilterRejection(status, raw) || IsAccountSideRejection(status, raw)) {

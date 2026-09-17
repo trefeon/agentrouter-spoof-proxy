@@ -145,6 +145,11 @@ func TestIsContentFilterRejection(t *testing.T) {
 		{"600 filter body is not rejection", 600, []byte("sensitive_words"), false},
 		{"case-sensitive mismatch", 500, []byte("Sensitive_Words"), false},
 		{"near-miss does not match", 500, []byte("sensitive words"), false},
+		{"400 content-blocked code", 400, []byte(`{"error":{"code":"content-blocked","message":"content-blocked"}}`), true},
+		{"400 plain bad request", 400, []byte(`{"error":{"message":"invalid request"}}`), false},
+		{"400 sensitive_words body is not rejection", 400, []byte("sensitive_words"), false},
+		{"500 content-blocked body is not rejection", 500, []byte("content-blocked"), false},
+		{"200 content-blocked body is not rejection", 200, []byte("content-blocked"), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

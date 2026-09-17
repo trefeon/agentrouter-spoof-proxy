@@ -38,6 +38,7 @@ const (
 	ScenarioSensitiveWords    = "sensitive_words"
 	ScenarioQuota402          = "quota_402"
 	ScenarioNoChannel503      = "no_channel_503"
+	ScenarioContentBlocked    = "content_blocked"
 	ScenarioError400          = "error_400"
 	ScenarioError429          = "error_429"
 	ScenarioError502          = "error_502"
@@ -376,6 +377,11 @@ func (m *MockUpstream) handleChat(w http.ResponseWriter) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = io.WriteString(w, `{"error":{"message":"当前分组 default 下对于模型 glm-5.3 无可用渠道 (request id: test-456)","type":"new_api_error"}}`)
+
+	case ScenarioContentBlocked:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"code":"content-blocked","message":"content-blocked (request id: test-789)","param":"","type":"agent_router_api_error"}}`)
 
 	case ScenarioError400:
 		w.Header().Set("Content-Type", "application/json")
