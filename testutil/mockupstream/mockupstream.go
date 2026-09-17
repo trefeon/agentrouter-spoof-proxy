@@ -35,6 +35,7 @@ const (
 	ScenarioWAF403            = "waf_403"
 	ScenarioNonWAF405         = "non_waf_405"
 	ScenarioError500          = "error_500"
+	ScenarioSensitiveWords    = "sensitive_words"
 	ScenarioError400          = "error_400"
 	ScenarioError429          = "error_429"
 	ScenarioError502          = "error_502"
@@ -358,6 +359,11 @@ func (m *MockUpstream) handleChat(w http.ResponseWriter) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = io.WriteString(w, `{"error":{"message":"internal error"}}`)
+
+	case ScenarioSensitiveWords:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":{"message":"sensitive words detected (request id: test-123)","type":"new_api_error","param":"","code":"sensitive_words_detected"}}`)
 
 	case ScenarioError400:
 		w.Header().Set("Content-Type", "application/json")

@@ -126,3 +126,31 @@ func TestIsWafBlock(t *testing.T) {
 	}
 }
 
+func TestIsContentFilterRejection(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   []byte
+		want   bool
+	}{
+		{"500 sensitive_words_detected code", 500, []byte(`{"error":{"message":"sensitive words detected","code":"sensitive_words_detected"}}`), true},
+		{"500 substring marker matches", 500, []byte("xsensitive_wordsy"), true},
+		{"502 filter body", 502, []byte("sensitive_words"), true},
+		{"599 filter body", 599, []byte("sensitive_words"), true},
+		{"500 plain internal error", 500, []byte(`{"error":{"message":"internal error"}}`), false},
+		{"500 empty body", 500, nil, false},
+		{"400 filter body is not rejection", 400, []byte("sensitive_words"), false},
+		{"200 filter body is not rejection", 200, []byte("sensitive_words"), false},
+		{"499 filter body is not rejection", 499, []byte("sensitive_words"), false},
+		{"600 filter body is not rejection", 600, []byte("sensitive_words"), false},
+		{"case-sensitive mismatch", 500, []byte("Sensitive_Words"), false},
+		{"near-miss does not match", 500, []byte("sensitive words"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsContentFilterRejection(tc.status, tc.body); got != tc.want {
+				t.Errorf("IsContentFilterRejection(%d, %q) = %v, want %v", tc.status, tc.body, got, tc.want)
+			}
+		})
+	}
+}

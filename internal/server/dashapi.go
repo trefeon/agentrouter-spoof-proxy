@@ -45,7 +45,7 @@ func (s *Server) handleDashStatus(w http.ResponseWriter, r *http.Request) {
 		"upstream":         s.cfg.Upstream(),
 		"modelSource":      s.discovery.Source(),
 		"staticModels":     len(s.cfg.StaticModelIDs()),
-		"availableModels":  len(s.discovery.List()),
+		"availableModels":  len(s.health.HealthyModels(s.discovery.List())),
 		"activeStreams":    s.active.Load(),
 		"wafCookie":        s.wafStore.Get() != "",
 		"circuitOpen":      s.breaker.IsOpen(),

@@ -111,8 +111,10 @@ func (h *Health) MarkDegraded(modelID, reason string) {
 
 // ProbeLoop runs recovery probes until ctx is canceled. Every
 // probeInterval it probes expired locks with POST /v1/messages (8s timeout,
-// spoof headers and current WAF cookie). 200 clears the lock, anything else
-// extends it. Cancel ctx to stop, there is no separate Stop method.
+// spoof headers and current WAF cookie). 200 clears the lock, as does any
+// 4xx (the keyless probe carries no Authorization, so a 4xx such as 401 is
+// not outage evidence). Only a 5xx or transport error extends the lock.
+// Cancel ctx to stop, there is no separate Stop method.
 func (h *Health) ProbeLoop(ctx context.Context, client *http.Client, host string, port int, getHeaders func() map[string]string, getCookie func() string) {
 	ticker := time.NewTicker(probeInterval)
 	defer ticker.Stop()
@@ -151,9 +153,11 @@ func (h *Health) probeOnce(ctx context.Context, client *http.Client, host string
 		if getCookie != nil {
 			cookie = getCookie()
 		}
-		if probeModel(ctx, client, host, port, id, cookie, headers) {
+		status, transportErr := probeModel(ctx, client, host, port, id, cookie, headers)
+		switch {
+		case !transportErr && (status == http.StatusOK || (status >= 400 && status < 500)):
 			h.clearLock(id)
-		} else {
+		default:
 			h.extendLock(id)
 		}
 	}
@@ -188,9 +192,10 @@ func ladderIndex(count int) int {
 }
 
 // probeModel sends one recovery probe with POST /v1/messages, minimal
-// payload, spoof headers and WAF cookie. Returns true only on 200. Uses
-// a fresh 8s client that shares the caller's Transport.
-func probeModel(ctx context.Context, client *http.Client, host string, port int, modelID, cookie string, headers map[string]string) bool {
+// payload, spoof headers and WAF cookie. It returns the upstream status code,
+// or transportErr=true when the request never completed. Uses a fresh 8s
+// client that shares the caller's Transport.
+func probeModel(ctx context.Context, client *http.Client, host string, port int, modelID, cookie string, headers map[string]string) (statusCode int, transportErr bool) {
 	body, err := json.Marshal(map[string]any{
 		"model":      modelID,
 		"max_tokens": 1,
@@ -198,11 +203,11 @@ func probeModel(ctx context.Context, client *http.Client, host string, port int,
 		"messages":   []map[string]string{{"role": "user", "content": "."}},
 	})
 	if err != nil {
-		return false
+		return 0, true
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL(host, port, "/v1/messages"), bytes.NewReader(body))
 	if err != nil {
-		return false
+		return 0, true
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -213,9 +218,9 @@ func probeModel(ctx context.Context, client *http.Client, host string, port int,
 	}
 	resp, err := clientWithTimeout(client, probeTimeout).Do(req)
 	if err != nil {
-		return false
+		return 0, true
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode == http.StatusOK
+	return resp.StatusCode, false
 }

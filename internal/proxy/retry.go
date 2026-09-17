@@ -79,3 +79,15 @@ func IsWafBlock(statusCode int, body []byte) bool {
 	return false
 }
 
+// IsContentFilterRejection reports whether an upstream response is a
+// deterministic content-filter rejection: a 5xx status whose body carries the
+// `sensitive_words` marker. Such rejections are client-side (the prompt hit
+// the filter), never evidence of an upstream outage, so callers must skip
+// retry, health marks, and breaker failure accounting. Matching is
+// case-sensitive.
+func IsContentFilterRejection(statusCode int, body []byte) bool {
+	if statusCode < 500 || statusCode > 599 {
+		return false
+	}
+	return strings.Contains(string(body), "sensitive_words")
+}

@@ -187,9 +187,9 @@ func TestProbeModelSuccess(t *testing.T) {
 	srv, log := probeSrv(t, http.StatusOK)
 	host, port := splitProbeHostPort(t, srv.URL)
 	headers := map[string]string{"Anthropic-Version": "2023-06-01", "Anthropic-Beta": "beta-set"}
-	ok := probeModel(context.Background(), srv.Client(), host, port, "m1", "acw_tc=probe", headers)
-	if !ok {
-		t.Fatal("probeModel must return true on HTTP 200")
+	status, transportErr := probeModel(context.Background(), srv.Client(), host, port, "m1", "acw_tc=probe", headers)
+	if transportErr || status != http.StatusOK {
+		t.Fatalf("probeModel = (%d, %v), want (200, false)", status, transportErr)
 	}
 	log.mu.Lock()
 	defer log.mu.Unlock()
@@ -207,8 +207,9 @@ func TestProbeModelSuccess(t *testing.T) {
 func TestProbeModelNon200(t *testing.T) {
 	srv, _ := probeSrv(t, http.StatusServiceUnavailable)
 	host, port := splitProbeHostPort(t, srv.URL)
-	if probeModel(context.Background(), srv.Client(), host, port, "m1", "", nil) {
-		t.Fatal("probeModel must return false on non-200")
+	status, transportErr := probeModel(context.Background(), srv.Client(), host, port, "m1", "", nil)
+	if transportErr || status != http.StatusServiceUnavailable {
+		t.Fatalf("probeModel = (%d, %v), want (503, false)", status, transportErr)
 	}
 }
 
@@ -217,16 +218,18 @@ func TestProbeModelNetworkError(t *testing.T) {
 	url := srv.URL
 	srv.Close()
 	host, port := splitProbeHostPort(t, url)
-	if probeModel(context.Background(), &http.Client{}, host, port, "m1", "", nil) {
-		t.Fatal("probeModel must return false on transport error")
+	status, transportErr := probeModel(context.Background(), &http.Client{}, host, port, "m1", "", nil)
+	if !transportErr {
+		t.Fatalf("probeModel = (%d, %v), want transportErr=true", status, transportErr)
 	}
 }
 
 func TestProbeModelNoCookieHeader(t *testing.T) {
 	srv, log := probeSrv(t, http.StatusOK)
 	host, port := splitProbeHostPort(t, srv.URL)
-	if !probeModel(context.Background(), srv.Client(), host, port, "m1", "", map[string]string{"Anthropic-Version": "2023-06-01"}) {
-		t.Fatal("probe must succeed")
+	status, transportErr := probeModel(context.Background(), srv.Client(), host, port, "m1", "", map[string]string{"Anthropic-Version": "2023-06-01"})
+	if transportErr || status != http.StatusOK {
+		t.Fatalf("probeModel = (%d, %v), want (200, false)", status, transportErr)
 	}
 	log.mu.Lock()
 	defer log.mu.Unlock()
@@ -386,3 +389,71 @@ func TestProbeLoopSkipsWhenNoLocks(t *testing.T) {
 	}
 }
 
+func expireProbeLock(h *Health, id string) {
+	h.mu.Lock()
+	h.failedUntil[id] = time.Now().UnixMilli() - 1
+	h.mu.Unlock()
+}
+
+func TestProbeOnceClearsLockOn401(t *testing.T) {
+	srv, _ := probeSrv(t, http.StatusUnauthorized)
+	host, port := splitProbeHostPort(t, srv.URL)
+
+	h := NewHealth()
+	h.MarkFailed("m401", 500)
+	expireProbeLock(h, "m401")
+
+	h.probeOnce(context.Background(), srv.Client(), host, port, nil, nil)
+
+	if !h.IsHealthy("m401") {
+		t.Fatal("probe 401 must clear the lock (4xx is not outage evidence)")
+	}
+	h.mu.Lock()
+	_, stillLocked := h.failCounts["m401"]
+	h.mu.Unlock()
+	if stillLocked {
+		t.Fatal("probe 401 must delete the failCounts entry")
+	}
+}
+
+func TestProbeOnceExtendsLockOn500(t *testing.T) {
+	srv, _ := probeSrv(t, http.StatusInternalServerError)
+	host, port := splitProbeHostPort(t, srv.URL)
+
+	h := NewHealth()
+	h.MarkFailed("m500", 500)
+	expireProbeLock(h, "m500")
+
+	h.probeOnce(context.Background(), srv.Client(), host, port, nil, nil)
+
+	if h.IsHealthy("m500") {
+		t.Fatal("probe 500 must extend the lock (model still down)")
+	}
+	h.mu.Lock()
+	count := h.failCounts["m500"]
+	h.mu.Unlock()
+	if count < 2 {
+		t.Fatalf("failCounts = %d, want >= 2 after a 500 probe extended the lock", count)
+	}
+}
+
+func TestProbeOnceClearsLockOn200(t *testing.T) {
+	srv, _ := probeSrv(t, http.StatusOK)
+	host, port := splitProbeHostPort(t, srv.URL)
+
+	h := NewHealth()
+	h.MarkFailed("m200", 500)
+	expireProbeLock(h, "m200")
+
+	h.probeOnce(context.Background(), srv.Client(), host, port, nil, nil)
+
+	if !h.IsHealthy("m200") {
+		t.Fatal("probe 200 must clear the lock")
+	}
+	h.mu.Lock()
+	_, stillLocked := h.failCounts["m200"]
+	h.mu.Unlock()
+	if stillLocked {
+		t.Fatal("probe 200 must delete the failCounts entry")
+	}
+}

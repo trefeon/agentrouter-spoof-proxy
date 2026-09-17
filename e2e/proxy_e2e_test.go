@@ -506,7 +506,6 @@ func TestSpoofHeadersClaudeCode(t *testing.T) {
 	}
 }
 
-
 func TestAuthorizationForwarded(t *testing.T) {
 	env := newEnv(t, nil)
 	_, _, _ = stream(t, env, "/v1/messages", chatBody(""), proxyHeaders())
@@ -1377,6 +1376,32 @@ func TestUnhealthyModelFilteredFromModels(t *testing.T) {
 		if mm, _ := m.(map[string]any); mm["id"] == "claude-opus-4-8" {
 			t.Errorf("unhealthy model claude-opus-4-8 still listed in /v1/models")
 		}
+	}
+}
+
+// A deterministic content-filter 500 must NOT lock the model: it stays listed
+// in /v1/models (mirror TestUnhealthyModelFilteredFromModels, which proves a
+// plain 500 does filter it out).
+func TestSensitiveWordsModelStillListed(t *testing.T) {
+	env := newEnv(t, func(c *config.Config) { c.MaxRetries = 0 })
+	env.Mock.SetScenario(mockupstream.ScenarioSensitiveWords)
+	status, body := postBody(t, env, "/v1/messages", chatBody("claude-opus-4-8"), proxyHeaders())
+	if status != http.StatusInternalServerError {
+		t.Fatalf("filter status = %d, want 500", status)
+	}
+	if !strings.Contains(string(body), "sensitive_words") {
+		t.Errorf("filter body must pass through intact, got %q", string(body))
+	}
+	_, modelsBody := getJSON(t, env, "/v1/models")
+	data, _ := modelsBody["data"].([]any)
+	found := false
+	for _, m := range data {
+		if mm, _ := m.(map[string]any); mm["id"] == "claude-opus-4-8" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("content-filtered model claude-opus-4-8 must remain listed in /v1/models")
 	}
 }
 

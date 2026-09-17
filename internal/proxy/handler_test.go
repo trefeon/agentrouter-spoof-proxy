@@ -521,6 +521,52 @@ func TestHandlerNonWaf4xxDoesNotTripBreaker(t *testing.T) {
 	}
 }
 
+// A deterministic content-filter 500 (sensitive_words body) must NOT penalize
+// the model: no retry, no health lock, breaker neither-fails-nor-succeeds.
+// The status + body pass through intact. Regression: doRequest treated every
+// 5xx as an upstream outage, so a filter hit retried, locked the model out of
+// /v1/models, and tripped the breaker.
+func TestHandlerSensitiveWordsNoHealthPenalty(t *testing.T) {
+	const sensitiveBody = `{"error":{"message":"sensitive words detected (request id: test-123)","type":"new_api_error","param":"","code":"sensitive_words_detected"}}`
+	var mu atomic.Int64
+	cfg := testUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, sensitiveBody)
+	}))
+	// testUpstream sets RetryOn5xx=true: exactly 1 upstream POST proves the
+	// filter rejection is never retried.
+	h, _, breaker, health, _ := testHandler(cfg)
+	rec := proxyRequest(t, h, http.MethodPost, "/v1/messages", `{"model":"m1","messages":[]}`, nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if rec.Body.String() != sensitiveBody {
+		t.Errorf("body = %q, want intact passthrough", rec.Body.String())
+	}
+	if got := mu.Load(); got != 1 {
+		t.Errorf("upstream POSTs = %d, want 1 (no retry on deterministic filter rejection)", got)
+	}
+	if !health.IsHealthy("m1") {
+		t.Error("model must stay healthy after a content-filter rejection")
+	}
+	healthy := health.HealthyModels([]models.Model{{ID: "m1"}, {ID: "m2"}})
+	found := false
+	for _, m := range healthy {
+		if m.ID == "m1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("m1 must remain in HealthyModels after a content-filter rejection")
+	}
+	if fails := breaker.ConsecutiveFails(); fails != 0 {
+		t.Errorf("breaker fails = %d, want 0 (filter rejection neither fails nor resets)", fails)
+	}
+	h.assertActive(t, 0)
+}
+
 // Client context cancellation aborts the request without a failure response.
 func TestHandlerClientDisconnect(t *testing.T) {
 	// A body that blocks reading until released (simulates a slow/hanging

@@ -354,8 +354,25 @@ func (h *Handler) doRequest(w http.ResponseWriter, r *http.Request, body []byte,
 			continue // WAF retried; next attempt
 		}
 
+		// Deterministic content-filter rejections (5xx + sensitive_words) are
+		// client-side, not an upstream outage: never retry, never mark model
+		// health, breaker neither-fails-nor-succeeds (mirror the 4xx
+		// accounting below). The body is buffered and restored so
+		// forwardNon200 passes the status + body through intact and stats
+		// still record. ResponseHasEmptyOutput only fires on 200, so a
+		// filter hit leaves zero health marks by construction.
+		contentFilter := false
+		if status >= 500 && status <= 599 {
+			raw, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if readErr == nil && IsContentFilterRejection(status, raw) {
+				contentFilter = true
+			}
+			resp.Body = io.NopCloser(bytes.NewReader(raw))
+		}
+
 		// 5xx retry, if exhausted, mark model unhealthy.
-		if IsRetryable(status, "", h.Cfg.RetryOn5xx) && attempt < h.Cfg.MaxRetries {
+		if !contentFilter && IsRetryable(status, "", h.Cfg.RetryOn5xx) && attempt < h.Cfg.MaxRetries {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 			h.Log.Info(fmt.Sprintf("%s %s <- %d, retrying (%d/%d)...", method, rawPath, status, attempt+1, h.Cfg.MaxRetries))
@@ -369,13 +386,14 @@ func (h *Handler) doRequest(w http.ResponseWriter, r *http.Request, body []byte,
 		if status == http.StatusTooManyRequests {
 			h.Health.MarkExhausted(model)
 		}
-		if status >= 500 {
+		if status >= 500 && !contentFilter {
 			h.Health.MarkFailed(model, status)
 		}
 
 		// Circuit accounting for a *final* upstream response: 5xx → failure,
 		// 429 → neither (model lockout only), 4xx → neither, <400 → success.
-		if status >= 500 {
+		// Content-filter 5xx → neither (deterministic client-side rejection).
+		if status >= 500 && !contentFilter {
 			h.Breaker.RecordFailure()
 		} else if status < 400 {
 			h.Breaker.RecordSuccess()
