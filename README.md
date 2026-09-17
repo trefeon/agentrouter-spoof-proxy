@@ -255,7 +255,7 @@ to `internal/auth/profile.go` → `GenericHeadersForProfile` /
 | `claude-opus-4-8` | 1M | 128K | $5 / $25 | [Anthropic](https://docs.anthropic.com/en/docs/about-claude/models) |
 | `deepseek-v4-flash` | — | — | — | [DeepSeek](https://api-docs.deepseek.com/) |
 | `glm-5.3` | — | — | — | [Zhipu/Z.ai](https://open.bigmodel.cn/) |
-| `gpt-6-astra` | — | — | — | — |
+| `gpt-6-astra` | 1.05M | 128K | $10 / $50 | [OpenAI](https://developers.openai.com/api/docs/models/gpt-6-astra) |
 
 ## Architecture
 ```
