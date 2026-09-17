@@ -99,7 +99,7 @@ Wait 5 seconds if `wafCookie: false`. WAF warmup runs at startup.
 | **Model-aware headers** | Sends Anthropic headers for `/v1/messages`, generic headers for `/v1/chat/completions`; header set is profile-aware |
 | **Auto model health** | Removes failing models from `/v1/models` so 9Router can fall back right away |
 | **Model recovery** | Background probe every 60s with spoof headers and WAF cookie |
-| **Prompt injection** | Optional system prompt injection (`INJECT_SYSTEM_PROMPT`) |
+| **Prompt injection** | Safe engineering-framing persona injected by default (`INJECT_SYSTEM_PROMPT` overrides, empty disables) |
 | **Model discovery** | Optional dynamic model list via `AR_API_KEY` |
 | **Bounded bodies** | 20MB limit gives clean `413`, stalled uploads give `408` |
 | **Narrow proxy surface** | Only the POST API routes below are proxied, binds to localhost by default, optional token auth |
@@ -159,7 +159,7 @@ All values have defaults. Copy `.env.example` to `.env` only if you need to chan
 | `MODELS_CSV` | `claude-opus-4-8,claude-opus-5,deepseek-v4-flash,glm-5.3,gpt-5.6-sol` | Static fallback model list (used when `AR_API_KEY` is not set) |
 | `AR_API_KEY` | _(empty)_ | Enable dynamic model discovery |
 | `DISCOVERY_INTERVAL_MS` | `600000` | Dynamic model discovery refresh interval |
-| `INJECT_SYSTEM_PROMPT` | _(empty)_ | System prompt injected into requests |
+| `INJECT_SYSTEM_PROMPT` | _default persona_ | System prompt injected into requests (unset = default, empty = disabled) |
 | `EXPOSURE_MODE` | `auto` | Dashboard mode: `auto` (per-request format auto-detect), `pooled` (one endpoint+key), `bridge` (per-model configs) |
 
 The proxy serves a minimal embedded admin dashboard at the root URL

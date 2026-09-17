@@ -184,3 +184,48 @@ func clearEnv(t *testing.T) func() {
 		}
 	}
 }
+
+// Unset INJECT_SYSTEM_PROMPT falls back to the safe default persona.
+func TestInjectPromptDefault(t *testing.T) {
+	clear := clearEnv(t)
+	defer clear()
+
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.InjectSystemPrompt != DefaultInjectSystemPrompt {
+		t.Errorf("InjectSystemPrompt default mismatch:\ngot:  %q\nwant: %q", c.InjectSystemPrompt, DefaultInjectSystemPrompt)
+	}
+	if c.InjectSystemPrompt == "" {
+		t.Error("InjectSystemPrompt default must not be empty")
+	}
+	// The default itself must never carry the upstream-flagged phrase.
+	if strings.Contains(c.InjectSystemPrompt, "You are a helpful assistant") {
+		t.Error("default persona must not contain the upstream-flagged phrase")
+	}
+}
+
+// Explicitly set INJECT_SYSTEM_PROMPT wins; explicitly empty disables.
+func TestInjectPromptExplicit(t *testing.T) {
+	clear := clearEnv(t)
+	defer clear()
+
+	t.Setenv("INJECT_SYSTEM_PROMPT", "custom-persona")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.InjectSystemPrompt != "custom-persona" {
+		t.Errorf("InjectSystemPrompt = %q, want custom-persona", c.InjectSystemPrompt)
+	}
+
+	t.Setenv("INJECT_SYSTEM_PROMPT", "")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.InjectSystemPrompt != "" {
+		t.Errorf("InjectSystemPrompt = %q, want empty (explicit empty disables injection)", c.InjectSystemPrompt)
+	}
+}
